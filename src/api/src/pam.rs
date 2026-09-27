@@ -697,10 +697,7 @@ pub async fn post_login(
 
     // TODO should we even do this user update here? The PAM user belongs to this user, but on the
     //  other hand, these metrics are for all non-PAM logins.
-    user.last_login = Some(Utc::now().timestamp());
-    user.last_failed_login = None;
-    user.failed_login_attempts = None;
-    user.save(None).await?;
+    user.save_login(None).await?;
 
     info!("New PAM login for user {}", user.email);
 

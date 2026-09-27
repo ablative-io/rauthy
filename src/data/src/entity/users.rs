@@ -59,6 +59,12 @@ failed_login_attempts = $12, language = $13, webauthn_user_id = $14, user_expire
 auth_provider_id = $16, federation_uid = $17, picture_id = $18
 WHERE id = $19"#;
 
+static SQL_SAVE_LOGIN: &str = r#"
+UPDATE USERS SET
+last_login = $1, last_failed_login = NULL, failed_login_attempts = NULL,
+password = COALESCE($2, password)
+WHERE id = $3"#;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccountType {
     // New -> neither password nor a passkey has been set yet
@@ -977,6 +983,34 @@ LIMIT $2"#;
         client.put(Cache::User, idx, self, CACHE_TTL_USER).await?;
 
         Ok(())
+    }
+
+    /// Records a successful login. Only the login fields are written, and the password when its
+    /// hash has been upgraded in `new_password_hash`. The rest of the row may have changed since
+    /// this user was read, for example a picture uploaded while the password was being verified,
+    /// and writing the whole user back would put those stale values over the newer ones.
+    pub async fn save_login(
+        &mut self,
+        new_password_hash: Option<String>,
+    ) -> Result<(), ErrorResponse> {
+        let now = Utc::now().timestamp();
+
+        if is_hiqlite() {
+            DB::hql()
+                .execute(SQL_SAVE_LOGIN, params!(now, &new_password_hash, &self.id))
+                .await?;
+        } else {
+            DB::pg_execute(SQL_SAVE_LOGIN, &[&now, &new_password_hash, &self.id]).await?;
+        }
+
+        self.last_login = Some(now);
+        self.last_failed_login = None;
+        self.failed_login_attempts = None;
+        if new_password_hash.is_some() {
+            self.password = new_password_hash;
+        }
+
+        User::invalidate_cache(&self.id, &self.email).await
     }
 
     /// Caution: Uses regex / LIKE on the database -> very costly query

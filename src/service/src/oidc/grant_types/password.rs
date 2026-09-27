@@ -90,19 +90,16 @@ pub async fn grant_type_password(
         Ok(_) => {
             client.validate_user_groups(&user)?;
 
-            user.last_login = Some(Utc::now().timestamp());
-            user.last_failed_login = None;
-            user.failed_login_attempts = None;
-
             // check if the password hash should be upgraded
             let hash_uptodate = user.is_argon2_uptodate(&RauthyConfig::get().argon2_params)?;
-            if !hash_uptodate {
+            let new_hash = if hash_uptodate {
+                None
+            } else {
                 info!("Updating Argon2ID params for user '{}'", &user.email);
-                let new_hash = HashPassword::hash_password(password).await?;
-                user.password = Some(new_hash);
-            }
+                Some(HashPassword::hash_password(password).await?)
+            };
 
-            user.save(None).await?;
+            user.save_login(new_hash).await?;
 
             if client.is_dynamic() {
                 ClientDyn::update_used(&client.id).await?;

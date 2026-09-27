@@ -2,7 +2,6 @@ use crate::user_values_validator::UserValuesValidator;
 use actix_web::HttpRequest;
 use actix_web::http::header;
 use actix_web::http::header::{HeaderName, HeaderValue};
-use chrono::Utc;
 use rauthy_api_types::oidc::{LoginRefreshRequest, LoginRequest};
 use rauthy_common::constants::COOKIE_MFA;
 use rauthy_common::utils::{get_rand, real_ip_from_req};
@@ -115,10 +114,7 @@ pub async fn post_authorize(
 
         // update user info
         // in case of webauthn login, the info will be updated in the oidc finish step
-        user.last_login = Some(Utc::now().timestamp());
-        user.last_failed_login = None;
-        user.failed_login_attempts = None;
-        user.save(None).await?;
+        user.save_login(None).await?;
     }
     // If the password was correct, we don't want a login delay anymore.
     // It should only prevent username enumeration and brute force, not degrade the UX.
