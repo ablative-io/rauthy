@@ -115,7 +115,6 @@ async fn test_clients() -> Result<(), Box<dyn Error>> {
     assert_eq!(res.status(), 200);
 
     let clients = res.json::<Vec<ClientResponse>>().await?;
-    let len_orig = clients.len();
     let client = clients.iter().find(|c| c.id == "rauthy").unwrap();
     println!("{:?}", client);
     assert_eq!(client.id, "rauthy");
@@ -294,8 +293,10 @@ async fn test_clients() -> Result<(), Box<dyn Error>> {
         .await?;
     assert_eq!(res.status(), 200);
 
+    // The other tests in this binary create and delete their own clients while this one runs, so
+    // the list is checked for this client's id rather than by its length.
     let clients = res.json::<Vec<ClientResponse>>().await?;
-    assert_eq!(clients.len(), len_orig);
+    assert!(clients.iter().all(|c| c.id != new_client.id));
 
     Ok(())
 }
