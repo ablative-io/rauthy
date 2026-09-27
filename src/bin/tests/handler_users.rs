@@ -199,7 +199,7 @@ async fn test_user_picture() -> Result<(), Box<dyn Error>> {
 
     // find our test user
     let res = client
-        .get(&format!("{}/users", get_backend_url()))
+        .get(format!("{}/users", get_backend_url()))
         .headers(auth_headers.clone())
         .send()
         .await?;
