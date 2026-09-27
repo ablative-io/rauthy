@@ -194,6 +194,68 @@ pub struct ProviderLinkedUserResponse {
     pub email: String,
 }
 
+/// One upstream provider identity linked to the signed-in user.
+#[derive(Serialize, ToSchema)]
+pub struct ProviderLinkResponse {
+    pub provider_id: String,
+    pub provider_name: String,
+    /// The provider's own subject for this identity.
+    pub federation_uid: String,
+    /// Unix timestamp in seconds
+    pub created: i64,
+    /// The oldest link, which the account's single provider fields show.
+    pub primary: bool,
+    /// Whether the receiver has acknowledged the audit of this link.
+    pub audit: ProviderLinkAuditState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderLinkAuditState {
+    Pending,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderLinkChange {
+    Linked,
+    Unlinked,
+}
+
+/// One link or unlink observation, as the audit receiver reads it.
+#[derive(Serialize, ToSchema)]
+pub struct ProviderLinkAuditResponse {
+    /// Stable across every delivery: the receiver deduplicates on it.
+    pub source_operation_id: String,
+    /// The Rauthy user the login belongs to.
+    pub user_id: String,
+    pub change: ProviderLinkChange,
+    pub provider_id: String,
+    /// The upstream provider's issuer, which names the linked login with `subject`.
+    pub issuer: String,
+    /// The upstream provider's subject for the linked login.
+    pub subject: String,
+    /// This Rauthy instance's issuer, which observed the change.
+    pub observer: String,
+    /// Unix timestamp in seconds
+    pub observed_at: i64,
+    pub state: ProviderLinkAuditState,
+    pub receipt: Option<String>,
+    /// Unix timestamp in seconds
+    pub acknowledged_at: Option<i64>,
+}
+
+#[derive(Deserialize, Validate, ToSchema)]
+#[cfg_attr(debug_assertions, derive(Serialize))]
+pub struct ProviderLinkAuditAckRequest {
+    /// The receiver's receipt for the observation.
+    ///
+    /// Validation: 1 to 16384 bytes of printable ASCII
+    #[validate(length(min = 1, max = 16384))]
+    pub receipt: String,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ProviderLookupResponse {
     pub issuer: String,

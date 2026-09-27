@@ -8,7 +8,7 @@ use rauthy_common::constants::{
 };
 use rauthy_data::api_cookie::ApiCookie;
 use rauthy_data::entity::atproto;
-use rauthy_data::entity::auth_providers::{AuthProvider, AuthProviderCallback};
+use rauthy_data::entity::auth_providers::{AuthProvider, AuthProviderCallback, ProviderLinkIntent};
 use rauthy_data::entity::clients::Client;
 use rauthy_data::rauthy_config::RauthyConfig;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
@@ -16,8 +16,12 @@ use std::fmt::Write;
 use tracing::error;
 
 /// returns (encrypted cookie, xsrf token, location header, optional allowed origins)
+///
+/// With a `link`, the callback carries the signed-in person's link intent, and its nonce is
+/// sent upstream.
 pub async fn login_start<'a>(
     payload: ProviderLoginRequest,
+    link: Option<ProviderLinkIntent>,
 ) -> Result<(Cookie<'a>, String, HeaderValue), ErrorResponse> {
     let provider = AuthProvider::find(&payload.provider_id).await?;
 
@@ -46,6 +50,8 @@ pub async fn login_start<'a>(
         provider_id: provider.id,
 
         pkce_challenge: payload.pkce_challenge,
+
+        link,
     };
 
     let mut location = format!(
@@ -69,6 +75,10 @@ pub async fn login_start<'a>(
             slf.pkce_challenge
         )
         .expect("write to always succeed");
+    }
+
+    if let Some(link) = &slf.link {
+        write!(location, "&nonce={}", link.nonce).expect("write to always succeed");
     }
 
     if let Some(input) = payload

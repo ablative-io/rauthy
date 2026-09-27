@@ -2,8 +2,11 @@ use crate::database::{Cache, DB};
 use crate::email::email_change_confirm::send_email_confirm_change;
 use crate::email::email_change_info::send_email_change_info_new;
 use crate::email::password_reset::send_pwd_reset;
+use crate::entity::auth_providers::AuthProvider;
 use crate::entity::continuation_token::ContinuationToken;
 use crate::entity::groups::Group;
+use crate::entity::identity_link_audit::{self, LinkChange};
+use crate::entity::identity_links::{self, IdentityLink};
 use crate::entity::magic_links::{MagicLink, MagicLinkUsage};
 use crate::entity::pam::users::PamUser;
 use crate::entity::password::PasswordPolicy;
@@ -51,13 +54,21 @@ use std::ops::Add;
 use time::OffsetDateTime;
 use tracing::{debug, error, trace};
 
+// `auth_provider_id` and `federation_uid` are not saved here: they mirror the user's oldest
+// provider link and only `IdentityLink` writes them, in the transaction that changes the links.
 static SQL_SAVE: &str = r#"
 UPDATE USERS SET
 email = $1, given_name = $2, family_name = $3, password = $4, roles = $5, groups = $6, enabled = $7,
 email_verified = $8, password_expires = $9, last_login = $10, last_failed_login = $11,
 failed_login_attempts = $12, language = $13, webauthn_user_id = $14, user_expires = $15,
-auth_provider_id = $16, federation_uid = $17, picture_id = $18
-WHERE id = $19"#;
+picture_id = $16
+WHERE id = $17"#;
+
+static SQL_INSERT: &str = r#"
+INSERT INTO users
+(id, email, given_name, family_name, roles, groups, enabled, email_verified, created_at,
+last_login, language, user_expires, auth_provider_id, federation_uid, picture_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#;
 
 static SQL_SAVE_LOGIN: &str = r#"
 UPDATE USERS SET
@@ -228,8 +239,122 @@ impl User {
         Ok(slf)
     }
 
-    pub async fn create_federated(new_user: User) -> Result<Self, ErrorResponse> {
-        Self::insert(new_user).await
+    /// Inserts a user onboarded by an upstream provider together with its first link and the
+    /// observation of that link, in one transaction.
+    pub async fn create_federated(new_user: User, issuer: &str) -> Result<Self, ErrorResponse> {
+        let (Some(provider_id), Some(federation_uid)) =
+            (&new_user.auth_provider_id, &new_user.federation_uid)
+        else {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::Internal,
+                "a federated user is created with its provider link",
+            ));
+        };
+        let lang = new_user.language.as_str();
+        let op = new_store_id();
+        let change = LinkChange::Linked.as_str();
+        let now = new_user.created_at;
+
+        if is_hiqlite() {
+            let txn: Vec<(&str, Params)> = vec![
+                (
+                    SQL_INSERT,
+                    params!(
+                        &new_user.id,
+                        &new_user.email,
+                        &new_user.given_name,
+                        &new_user.family_name,
+                        &new_user.roles,
+                        &new_user.groups,
+                        new_user.enabled,
+                        new_user.email_verified,
+                        new_user.created_at,
+                        new_user.last_login,
+                        lang,
+                        new_user.user_expires,
+                        provider_id,
+                        federation_uid,
+                        &new_user.picture_id
+                    ),
+                ),
+                (
+                    identity_links::SQL_INSERT,
+                    params!(provider_id, federation_uid, &new_user.id, now),
+                ),
+                (
+                    identity_link_audit::SQL_INSERT,
+                    params!(
+                        &op,
+                        &new_user.id,
+                        provider_id,
+                        issuer,
+                        federation_uid,
+                        change,
+                        now
+                    ),
+                ),
+            ];
+            for res in DB::hql()
+                .txn(txn)
+                .await
+                .map_err(|err| map_unique_email(ErrorResponse::from(err)))?
+            {
+                res.map_err(|err| map_unique_email(ErrorResponse::from(err)))?;
+            }
+        } else {
+            let mut cl = DB::pg().await?;
+            let txn = cl.transaction().await?;
+            DB::pg_txn_append(
+                &txn,
+                SQL_INSERT,
+                &[
+                    &new_user.id,
+                    &new_user.email,
+                    &new_user.given_name,
+                    &new_user.family_name,
+                    &new_user.roles,
+                    &new_user.groups,
+                    &new_user.enabled,
+                    &new_user.email_verified,
+                    &new_user.created_at,
+                    &new_user.last_login,
+                    &lang,
+                    &new_user.user_expires,
+                    provider_id,
+                    federation_uid,
+                    &new_user.picture_id,
+                ],
+            )
+            .await
+            .map_err(map_unique_email)?;
+            DB::pg_txn_append(
+                &txn,
+                identity_links::SQL_INSERT,
+                &[provider_id, federation_uid, &new_user.id, &now],
+            )
+            .await?;
+            DB::pg_txn_append(
+                &txn,
+                identity_link_audit::SQL_INSERT,
+                &[
+                    &op,
+                    &new_user.id,
+                    provider_id,
+                    &issuer,
+                    federation_uid,
+                    &change,
+                    &now,
+                ],
+            )
+            .await?;
+            txn.commit()
+                .await
+                .map_err(|err| map_unique_email(err.into()))?;
+        }
+
+        Self::count_inc().await?;
+
+        Ok(new_user)
     }
 
     pub async fn create_from_new(mut new_user_req: NewUserRequest) -> Result<User, ErrorResponse> {
@@ -314,11 +439,56 @@ impl User {
             UserPicture::remove(picture_id.clone(), self.id.clone()).await?;
         }
 
+        // The user's links go with it. Each one is recorded as unlinked in the same transaction.
+        let now = Utc::now().timestamp();
+        let mut removed = Vec::new();
+        for link in IdentityLink::find_by_user(&self.id).await? {
+            let issuer = AuthProvider::find(&link.provider_id).await?.issuer;
+            removed.extend(IdentityLink::audit_removal(&[link], &issuer, now));
+        }
+
         let sql = "DELETE FROM users WHERE id = $1";
         if is_hiqlite() {
-            DB::hql().execute(sql, params!(&self.id)).await?;
+            let mut txn: Vec<(&str, Params)> = Vec::with_capacity(removed.len() + 1);
+            for a in &removed {
+                txn.push((
+                    identity_link_audit::SQL_INSERT,
+                    params!(
+                        &a.id,
+                        &a.user_id,
+                        &a.provider_id,
+                        &a.issuer,
+                        &a.federation_uid,
+                        &a.link_change,
+                        a.observed_at
+                    ),
+                ));
+            }
+            txn.push((sql, params!(&self.id)));
+            for res in DB::hql().txn(txn).await? {
+                res?;
+            }
         } else {
-            DB::pg_execute(sql, &[&self.id]).await?;
+            let mut cl = DB::pg().await?;
+            let txn = cl.transaction().await?;
+            for a in &removed {
+                DB::pg_txn_append(
+                    &txn,
+                    identity_link_audit::SQL_INSERT,
+                    &[
+                        &a.id,
+                        &a.user_id,
+                        &a.provider_id,
+                        &a.issuer,
+                        &a.federation_uid,
+                        &a.link_change,
+                        &a.observed_at,
+                    ],
+                )
+                .await?;
+            }
+            DB::pg_txn_append(&txn, sql, &[&self.id]).await?;
+            txn.commit().await?;
         }
 
         Self::invalidate_cache(&self.id, &self.email).await?;
@@ -396,7 +566,10 @@ impl User {
         auth_provider_id: &str,
         federation_uid: &str,
     ) -> Result<Self, ErrorResponse> {
-        let sql = "SELECT * FROM users WHERE auth_provider_id = $1 AND federation_uid = $2";
+        let sql = r#"
+SELECT u.* FROM users u
+JOIN identity_links l ON l.user_id = u.id
+WHERE l.provider_id = $1 AND l.federation_uid = $2"#;
         let slf = if is_hiqlite() {
             DB::hql()
                 .query_as_one(sql, params!(auth_provider_id, federation_uid))
@@ -624,11 +797,7 @@ OFFSET $2"#;
 
     pub async fn insert(new_user: User) -> Result<Self, ErrorResponse> {
         let lang = new_user.language.as_str();
-        let sql = r#"
-INSERT INTO users
-(id, email, given_name, family_name, roles, groups, enabled, email_verified, created_at,
-last_login, language, user_expires, auth_provider_id, federation_uid, picture_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#;
+        let sql = SQL_INSERT;
 
         if is_hiqlite() {
             DB::hql()
@@ -804,23 +973,29 @@ LIMIT $2"#;
         Ok(res)
     }
 
+    /// Removes the user's only provider link.
+    ///
+    /// With more than one link, the link to remove must be named, and this is refused.
     pub async fn provider_unlink(user_id: String) -> Result<Self, ErrorResponse> {
-        // we need to find the user first and validate that it has been set up properly
-        // to work without a provider
-        let mut slf = Self::find(user_id).await?;
-        if slf.password.is_none() && !slf.has_webauthn_enabled() {
-            return Err(ErrorResponse::new(
-                ErrorResponseType::BadRequest,
-                "You must have at least a password or passkey set up before you can \
-                remove a provider link",
-            ));
+        let links = IdentityLink::find_by_user(&user_id).await?;
+        match links.as_slice() {
+            [] => {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::NotFound,
+                    "identity_link_unknown: you have no provider link",
+                ));
+            }
+            [link] => IdentityLink::unlink(&user_id, &link.provider_id).await?,
+            _ => {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::BadRequest,
+                    "identity_link_ambiguous: you have more than one provider link, name the \
+                    provider to unlink",
+                ));
+            }
         }
 
-        slf.auth_provider_id = None;
-        slf.federation_uid = None;
-        slf.save(None).await?;
-
-        Ok(slf)
+        Self::find(user_id).await
     }
 
     /// Appends multiple necessary transaction queries to update a user to the given `Vec<_>`.
@@ -851,8 +1026,6 @@ LIMIT $2"#;
                 self.language.as_str().to_string(),
                 self.webauthn_user_id,
                 self.user_expires,
-                self.auth_provider_id,
-                self.federation_uid,
                 self.picture_id,
                 self.id
             ),
@@ -890,8 +1063,6 @@ LIMIT $2"#;
                 &lang,
                 &self.webauthn_user_id,
                 &self.user_expires,
-                &self.auth_provider_id,
-                &self.federation_uid,
                 &self.picture_id,
                 &self.id,
             ],
@@ -929,8 +1100,6 @@ LIMIT $2"#;
                         lang,
                         &self.webauthn_user_id,
                         self.user_expires,
-                        &self.auth_provider_id,
-                        &self.federation_uid,
                         &self.picture_id,
                         &self.id
                     ),
@@ -955,8 +1124,6 @@ LIMIT $2"#;
                     &lang,
                     &self.webauthn_user_id,
                     &self.user_expires,
-                    &self.auth_provider_id,
-                    &self.federation_uid,
                     &self.picture_id,
                     &self.id,
                 ],
@@ -2065,6 +2232,18 @@ impl User {
                 "Invalid user credentials",
             ))
         }
+    }
+}
+
+/// Names a unique violation on inserting a user the way `User::insert` does.
+fn map_unique_email(err: ErrorResponse) -> ErrorResponse {
+    if err.message.contains("UNIQUE") || err.message.contains("unique constraint") {
+        ErrorResponse::new(
+            ErrorResponseType::NotAccepted,
+            "UNIQUE constraint on: 'email'",
+        )
+    } else {
+        err
     }
 }
 

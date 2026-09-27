@@ -3,18 +3,21 @@ use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::web::{Json, Query};
 use actix_web::{HttpRequest, HttpResponse, delete, get, post, put, web};
 use actix_web_lab::__reexports::futures_util::StreamExt;
+use chrono::Utc;
+use cryptr::utils::secure_random_alnum;
 use rauthy_api_types::auth_providers::{
-    ProviderCallbackRequest, ProviderLinkedUserResponse, ProviderLoginRequest,
-    ProviderLookupRequest, ProviderRequest,
+    ProviderCallbackRequest, ProviderLinkAuditAckRequest, ProviderLinkAuditResponse,
+    ProviderLinkResponse, ProviderLinkedUserResponse, ProviderLoginRequest, ProviderLookupRequest,
+    ProviderRequest,
 };
 use rauthy_api_types::auth_providers::{ProviderLookupResponse, ProviderResponse};
 use rauthy_api_types::generic::LogoParams;
 use rauthy_api_types::users::{UserResponse, WebauthnLoginResponse};
 use rauthy_common::constants::{HEADER_JSON, PROVIDER_ATPROTO};
 use rauthy_data::entity::api_keys::{AccessGroup, AccessRights};
-use rauthy_data::entity::auth_providers::{
-    AuthProvider, AuthProviderLinkCookie, AuthProviderTemplate,
-};
+use rauthy_data::entity::auth_providers::{AuthProvider, AuthProviderTemplate, ProviderLinkIntent};
+use rauthy_data::entity::identity_link_audit::IdentityLinkAudit;
+use rauthy_data::entity::identity_links::{self, IdentityLink};
 use rauthy_data::entity::logos::{Logo, LogoType};
 use rauthy_data::entity::pow::PowEntity;
 use rauthy_data::entity::theme::ThemeCssFull;
@@ -156,7 +159,7 @@ pub async fn post_provider_login(
     PowEntity::check_prevent_reuse(challenge.to_string()).await?;
 
     let (cookie, xsrf_token, location) =
-        rauthy_service::oidc::auth_providers::login_start::login_start(payload).await?;
+        rauthy_service::oidc::auth_providers::login_start::login_start(payload, None).await?;
 
     Ok(HttpResponse::Accepted()
         .insert_header((LOCATION, location))
@@ -232,9 +235,10 @@ pub async fn post_provider_callback_handle(
 
 /// DELETE a link between an existing user account and an upstream provider
 ///
-/// This will always unlink the currently logged-in user from its registered
-/// upstream auth provider. The user account must have been set up with at least
-/// a password or a passkey. Otherwise, this endpoint will return an error.
+/// This unlinks the currently logged-in user from its only upstream auth provider link. With
+/// more than one link, use `DELETE /providers/{id}/link` instead. The account must keep
+/// another way to sign in: a password, a passkey or another provider link. Otherwise, this
+/// endpoint will return an error.
 #[utoipa::path(
     delete,
     path = "/providers/link",
@@ -503,18 +507,22 @@ pub async fn delete_provider_img(
 
 /// POST a link between an existing user account and an upstream provider
 ///
-/// This action will create a link between an already existing, non-linked account and a configured
-/// upstream auth provider. This can only be issued from within an authenticated, valid session.
+/// This starts linking one more upstream provider to the account of the signed-in person. It
+/// needs an authenticated session whose person signed in within the last
+/// `LINK_REAUTH_MAX_AGE_SECS` seconds. The link is completed by the provider's callback in the
+/// same session, is bound to that single callback, and never attaches the upstream identity to
+/// any other account, whatever its email.
 #[utoipa::path(
     post,
     path = "/providers/{id}/link",
     tag = "providers",
     request_body = ProviderLoginRequest,
     responses(
-        (status = 200, description = "OK"),
+        (status = 202, description = "Accepted, the Location header leads to the provider"),
         (status = 400, description = "BadRequest", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 428, description = "PreconditionRequired - sign in again first", body = ErrorResponse),
     ),
 )]
 #[post("/providers/{id}/link")]
@@ -523,34 +531,172 @@ pub async fn post_provider_link(
     principal: ReqPrincipal,
     Json(payload): Json<ProviderLoginRequest>,
 ) -> Result<HttpResponse, ErrorResponse> {
-    principal.validate_session_auth()?;
+    let session = principal.validate_session_auth()?;
     payload.validate()?;
 
-    let user_id = principal.user_id()?.to_string();
-    let user = User::find(user_id).await?;
-
-    // make sure the user is currently un-linked
-    if user.auth_provider_id.is_some() {
+    let provider_id = provider_id.into_inner();
+    if payload.provider_id != provider_id {
         return Err(ErrorResponse::new(
             ErrorResponseType::BadRequest,
-            "user is already federated",
+            "identity_link_provider_mismatch: the body names another provider than the path",
         ));
     }
 
-    // set an encrypted cookie with the provider_id + user_id / email
-    let link_cookie = AuthProviderLinkCookie {
-        provider_id: provider_id.into_inner(),
+    let user = User::find(principal.user_id()?.to_string()).await?;
+    identity_links::check_fresh_authentication(user.last_login, Utc::now().timestamp())?;
+    IdentityLink::check_provider_free(&user.id, &provider_id).await?;
+
+    let link = ProviderLinkIntent {
         user_id: user.id,
-        user_email: user.email,
+        session_id: session.id.clone(),
+        nonce: secure_random_alnum(32),
     };
 
     // directly redirect to the provider login page
     let (login_cookie, xsrf_token, location) =
-        rauthy_service::oidc::auth_providers::login_start::login_start(payload).await?;
+        rauthy_service::oidc::auth_providers::login_start::login_start(payload, Some(link)).await?;
 
     Ok(HttpResponse::Accepted()
         .insert_header((LOCATION, location))
         .cookie(login_cookie)
-        .cookie(link_cookie.build_cookie()?)
         .body(xsrf_token))
+}
+
+/// DELETE the signed-in user's link to the upstream provider `id`
+///
+/// The account must keep another way to sign in: a password, a passkey or another provider
+/// link. The unlink and its audit observation are committed together.
+#[utoipa::path(
+    delete,
+    path = "/providers/{id}/link",
+    tag = "providers",
+    responses(
+        (status = 200, description = "OK", body = UserResponse),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 404, description = "NotFound", body = ErrorResponse),
+    ),
+)]
+#[delete("/providers/{id}/link")]
+pub async fn delete_provider_link_by_id(
+    provider_id: web::Path<String>,
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    principal.validate_session_auth()?;
+
+    let user_id = principal.user_id()?.to_string();
+    IdentityLink::unlink(&user_id, &provider_id.into_inner()).await?;
+    let user = User::find(user_id).await?;
+    Ok(HttpResponse::Ok().json(user.into_response(None)))
+}
+
+/// GET the signed-in user's upstream provider links
+///
+/// The first link is the primary one. Each link shows whether the audit receiver has
+/// acknowledged its audit yet.
+#[utoipa::path(
+    get,
+    path = "/providers/links",
+    tag = "providers",
+    responses(
+        (status = 200, description = "OK", body = [ProviderLinkResponse]),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    ),
+)]
+#[get("/providers/links")]
+pub async fn get_provider_links(principal: ReqPrincipal) -> Result<HttpResponse, ErrorResponse> {
+    principal.validate_session_auth()?;
+
+    let links = IdentityLink::find_for_response(principal.user_id()?).await?;
+    Ok(HttpResponse::Ok().json(links))
+}
+
+/// GET the upstream provider links of the user `id`
+///
+/// **Permissions**
+/// - `rauthy_admin`
+#[utoipa::path(
+    get,
+    path = "/providers/links/users/{id}",
+    tag = "providers",
+    responses(
+        (status = 200, description = "OK", body = [ProviderLinkResponse]),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    ),
+)]
+#[get("/providers/links/users/{id}")]
+pub async fn get_user_provider_links(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    principal.validate_api_key_or_admin_session(AccessGroup::Users, AccessRights::Read)?;
+
+    let links = IdentityLink::find_for_response(&id.into_inner()).await?;
+    Ok(HttpResponse::Ok().json(links))
+}
+
+/// GET every provider link audit observation the receiver has not acknowledged yet
+///
+/// Oldest first. An observation stays here, with the same `source_operation_id`, until it is
+/// acknowledged, so an outage of the receiver shows as a growing list and never as a completed
+/// audit.
+///
+/// **Permissions**
+/// - `rauthy_admin`
+#[utoipa::path(
+    get,
+    path = "/providers/links/audit",
+    tag = "providers",
+    responses(
+        (status = 200, description = "OK", body = [ProviderLinkAuditResponse]),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+    ),
+)]
+#[get("/providers/links/audit")]
+pub async fn get_provider_link_audit(
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    principal.validate_api_key_or_admin_session(AccessGroup::AuthProviders, AccessRights::Read)?;
+
+    let res = IdentityLinkAudit::find_pending()
+        .await?
+        .into_iter()
+        .map(IdentityLinkAudit::into_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(HttpResponse::Ok().json(res))
+}
+
+/// POST the receiver's receipt for one provider link audit observation
+///
+/// Acknowledging with the same receipt again answers the stored observation and changes
+/// nothing. A different receipt for an acknowledged observation is refused.
+///
+/// **Permissions**
+/// - `rauthy_admin`
+#[utoipa::path(
+    post,
+    path = "/providers/links/audit/{id}/ack",
+    tag = "providers",
+    request_body = ProviderLinkAuditAckRequest,
+    responses(
+        (status = 200, description = "OK", body = ProviderLinkAuditResponse),
+        (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden", body = ErrorResponse),
+        (status = 404, description = "NotFound", body = ErrorResponse),
+    ),
+)]
+#[post("/providers/links/audit/{id}/ack")]
+pub async fn post_provider_link_audit_ack(
+    id: web::Path<String>,
+    principal: ReqPrincipal,
+    Json(payload): Json<ProviderLinkAuditAckRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    principal
+        .validate_api_key_or_admin_session(AccessGroup::AuthProviders, AccessRights::Update)?;
+    payload.validate()?;
+
+    let audit = IdentityLinkAudit::acknowledge(&id.into_inner(), &payload.receipt).await?;
+    Ok(HttpResponse::Ok().json(audit.into_response()?))
 }

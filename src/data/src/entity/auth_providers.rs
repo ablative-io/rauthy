@@ -1,16 +1,17 @@
-use crate::api_cookie::ApiCookie;
 use crate::database::{Cache, DB};
+use crate::entity::identity_link_audit;
+use crate::entity::identity_links::{self, IdentityLink};
 use crate::entity::logos::{Logo, LogoType};
 use crate::entity::users::User;
 use crate::entity::users_values::UserValues;
 use crate::entity::{atproto, auth_provider_cust_impls};
 use crate::language::Language;
 use crate::rauthy_config::RauthyConfig;
-use actix_web::cookie::Cookie;
 use atrium_api::xrpc::http::header::{ACCEPT, AUTHORIZATION};
 use atrium_common::store::Store;
 use chrono::Utc;
 use cryptr::EncValue;
+use hiqlite::Params;
 use hiqlite::macros::{FromRow, params};
 use itertools::Itertools;
 use rauthy_api_types::auth_providers::{
@@ -20,11 +21,9 @@ use rauthy_api_types::auth_providers::{ProviderLookupRequest, ProviderRequest};
 use rauthy_api_types::users::UserValuesRequest;
 use rauthy_common::constants::{
     APPLICATION_JSON, CACHE_TTL_APP, CACHE_TTL_AUTH_PROVIDER_CALLBACK, IDX_AUTH_PROVIDER,
-    IDX_AUTH_PROVIDER_TEMPLATE, PROVIDER_ATPROTO, PROVIDER_LINK_COOKIE,
+    IDX_AUTH_PROVIDER_TEMPLATE, PROVIDER_ATPROTO,
 };
-use rauthy_common::utils::{
-    base64_decode, base64_encode, base64_url_no_pad_decode, deserialize, new_store_id, serialize,
-};
+use rauthy_common::utils::{base64_url_no_pad_decode, new_store_id};
 use rauthy_common::{http_client, is_hiqlite};
 use rauthy_derive::FromPgRow;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
@@ -121,33 +120,16 @@ pub struct WellKnownLookup {
     pub code_challenge_methods_supported: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthProviderLinkCookie {
-    pub provider_id: String,
+/// A signed-in person's request to link one more upstream identity to their own account.
+///
+/// It travels inside the single-use [`AuthProviderCallback`], so it is bound to that callback's
+/// state, CSRF token, PKCE challenge and provider, and it is gone once the callback is used. It
+/// names the account and the session that asked for it, and the nonce sent upstream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderLinkIntent {
     pub user_id: String,
-    pub user_email: String,
-}
-
-impl TryFrom<&str> for AuthProviderLinkCookie {
-    type Error = ErrorResponse;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        let bytes = base64_decode(value)?;
-        let slf = deserialize::<AuthProviderLinkCookie>(bytes.as_slice())?;
-        Ok(slf)
-    }
-}
-
-impl AuthProviderLinkCookie {
-    pub fn build_cookie(&self) -> Result<Cookie<'_>, ErrorResponse> {
-        let bytes = serialize(self)?;
-        let value = base64_encode(&bytes);
-        Ok(ApiCookie::build(PROVIDER_LINK_COOKIE, value, 300))
-    }
-
-    pub fn deletion_cookie<'a>() -> Cookie<'a> {
-        ApiCookie::build(PROVIDER_LINK_COOKIE, "", 0)
-    }
+    pub session_id: String,
+    pub nonce: String,
 }
 
 /// Upstream Auth Provider for upstream logins without a local Rauthy account
@@ -325,7 +307,10 @@ VALUES
     pub async fn find_linked_users(
         id: &str,
     ) -> Result<Vec<ProviderLinkedUserResponse>, ErrorResponse> {
-        let sql = "SELECT id, email FROM users WHERE auth_provider_id = $1";
+        let sql = r#"
+SELECT u.id, u.email FROM identity_links l
+JOIN users u ON u.id = l.user_id
+WHERE l.provider_id = $1"#;
         let users = if is_hiqlite() {
             DB::hql().query_as(sql, params!(id)).await?
         } else {
@@ -335,12 +320,70 @@ VALUES
         Ok(users)
     }
 
+    /// Deletes the provider together with every link to it. Each removed link is recorded as
+    /// unlinked, and each affected user's primary link moves on, in the same transaction.
     pub async fn delete(id: &str) -> Result<(), ErrorResponse> {
+        let links = IdentityLink::find_by_provider(id).await?;
+        let issuer = if links.is_empty() {
+            String::default()
+        } else {
+            Self::find(id).await?.issuer
+        };
+        let removed = IdentityLink::audit_removal(&links, &issuer, Utc::now().timestamp());
+
         let sql = "DELETE FROM auth_providers WHERE id = $1";
         if is_hiqlite() {
-            DB::hql().execute(sql, params!(id)).await?;
+            let mut txn: Vec<(&str, Params)> = Vec::with_capacity(removed.len() * 2 + 1);
+            for a in &removed {
+                txn.push((
+                    identity_link_audit::SQL_INSERT,
+                    params!(
+                        &a.id,
+                        &a.user_id,
+                        &a.provider_id,
+                        &a.issuer,
+                        &a.federation_uid,
+                        &a.link_change,
+                        a.observed_at
+                    ),
+                ));
+            }
+            txn.push((sql, params!(id)));
+            for a in &removed {
+                txn.push((identity_links::SQL_PRIMARY, params!(&a.user_id)));
+            }
+            for res in DB::hql().txn(txn).await? {
+                res?;
+            }
         } else {
-            DB::pg_execute(sql, &[]).await?;
+            let mut cl = DB::pg().await?;
+            let txn = cl.transaction().await?;
+            for a in &removed {
+                DB::pg_txn_append(
+                    &txn,
+                    identity_link_audit::SQL_INSERT,
+                    &[
+                        &a.id,
+                        &a.user_id,
+                        &a.provider_id,
+                        &a.issuer,
+                        &a.federation_uid,
+                        &a.link_change,
+                        &a.observed_at,
+                    ],
+                )
+                .await?;
+            }
+            DB::pg_txn_append(&txn, sql, &[&id]).await?;
+            for a in &removed {
+                DB::pg_txn_append(&txn, identity_links::SQL_PRIMARY, &[&a.user_id]).await?;
+            }
+            txn.commit().await?;
+        }
+
+        for a in &removed {
+            let user = User::find(a.user_id.clone()).await?;
+            User::invalidate_cache(&user.id, &user.email).await?;
         }
 
         Self::invalidate_cache_all().await?;
@@ -653,6 +696,9 @@ pub struct AuthProviderCallback {
 
     // TODO add a nonce upstream as well? -> improvement?
     pub pkce_challenge: String,
+
+    /// Set when a signed-in person links this provider to their own account.
+    pub link: Option<ProviderLinkIntent>,
 }
 
 // CRUD
@@ -716,7 +762,7 @@ impl AuthProviderCallback {
     pub async fn extract_user(
         &self,
         provider: &AuthProvider,
-        link_cookie: &Option<AuthProviderLinkCookie>,
+        link: Option<&ProviderLinkIntent>,
         payload: &ProviderCallbackRequest,
     ) -> Result<(User, ProviderMfaLogin, NewFederatedUserCreated), ErrorResponse> {
         let mut payload = OidcCodeRequestParams {
@@ -793,11 +839,17 @@ impl AuthProviderCallback {
         if let Some(id_token) = ts.id_token {
             let claims_bytes = AuthProviderIdClaims::self_as_bytes_from_token(&id_token)?;
 
+            // A link binds the nonce it sent upstream: an ID token issued for any other request
+            // is refused before its claims are used, and never falls back to userinfo.
+            if let Some(link) = link {
+                AuthProviderIdClaims::check_link_nonce(&claims_bytes, link)?;
+            }
+
             // Some providers like Discord send pretty useless id_tokens that do not even contain
             // the requested claims. If anything fails to extract at least the bare minimum, we want
             // to go on and try fetching userinfo using the access token below.
             match AuthProviderIdClaims::try_from(claims_bytes.as_slice()) {
-                Ok(claims) => match claims.validate_update_user(provider, link_cookie).await {
+                Ok(claims) => match claims.validate_update_user(provider, link).await {
                     Ok(res) => return Ok(res),
                     Err(err) => {
                         debug!("Error validating the user extracted from the id_claims: {err}");
@@ -831,7 +883,7 @@ impl AuthProviderCallback {
                     .await?;
             }
 
-            claims.validate_update_user(provider, link_cookie).await
+            claims.validate_update_user(provider, link).await
         } else {
             let err = "Neither `access_token` nor `id_token` existed";
             error!("{err}");
@@ -842,7 +894,7 @@ impl AuthProviderCallback {
     pub async fn extract_user_at_proto(
         &self,
         provider: &AuthProvider,
-        link_cookie: &Option<AuthProviderLinkCookie>,
+        link: Option<&ProviderLinkIntent>,
         payload: &ProviderCallbackRequest,
     ) -> Result<(User, ProviderMfaLogin, NewFederatedUserCreated), ErrorResponse> {
         let atproto = atproto::Client::get();
@@ -916,7 +968,7 @@ impl AuthProviderCallback {
             ..Default::default()
         };
 
-        claims.validate_update_user(provider, link_cookie).await
+        claims.validate_update_user(provider, link).await
     }
 }
 
@@ -1068,6 +1120,32 @@ impl AuthProviderIdClaims<'_> {
         }
     }
 
+    /// Refuses ID token claims whose `nonce` is not the one the link intent sent upstream.
+    pub fn check_link_nonce(
+        claims_bytes: &[u8],
+        link: &ProviderLinkIntent,
+    ) -> Result<(), ErrorResponse> {
+        #[derive(Deserialize)]
+        struct NonceClaim<'a> {
+            nonce: Option<Cow<'a, str>>,
+        }
+
+        let claim = serde_json::from_slice::<NonceClaim>(claims_bytes).map_err(|_| {
+            ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                "identity_link_nonce_mismatch: the ID token claims could not be read",
+            )
+        })?;
+        if claim.nonce.as_deref() == Some(link.nonce.as_str()) {
+            Ok(())
+        } else {
+            Err(ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                "identity_link_nonce_mismatch: the ID token was not issued for this link",
+            ))
+        }
+    }
+
     pub fn self_as_bytes_from_token(token: &str) -> Result<Vec<u8>, ErrorResponse> {
         let mut parts = token.split('.');
         let _header = parts.next().ok_or_else(|| {
@@ -1087,7 +1165,7 @@ impl AuthProviderIdClaims<'_> {
     pub async fn validate_update_user(
         &self,
         provider: &AuthProvider,
-        link_cookie: &Option<AuthProviderLinkCookie>,
+        link: Option<&ProviderLinkIntent>,
     ) -> Result<(User, ProviderMfaLogin, NewFederatedUserCreated), ErrorResponse> {
         if self.email.is_none() {
             let err = "No `email` in ID token claims. This is a mandatory claim";
@@ -1123,6 +1201,14 @@ impl AuthProviderIdClaims<'_> {
             }
         };
 
+        // A link attaches this identity to the account the signed-in person named, never to an
+        // account found by email, and changes nothing else about that account.
+        if let Some(link) = link {
+            IdentityLink::link(&link.user_id, provider, &claims_user_id).await?;
+            let user = User::find(link.user_id.clone()).await?;
+            return Ok((user, ProviderMfaLogin::No, NewFederatedUserCreated::No));
+        }
+
         let (user_opt, new_federated_user) = match User::find_by_federation(
             &provider.id,
             &claims_user_id,
@@ -1135,49 +1221,19 @@ impl AuthProviderIdClaims<'_> {
             }
             Err(_) => {
                 debug!("did not find already existing user by federation lookup");
-                if let Ok(mut user) =
+                if let Ok(user) =
                     User::find_by_email(self.email.as_ref().unwrap().to_string()).await
                 {
-                    if let Some(link) = link_cookie {
-                        if link.provider_id != provider.id {
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "bad provider_id in link cookie",
-                            ));
-                        }
-
-                        if link.user_id != user.id {
-                            // In this case, the link cookie exists from another user session.
-                            // It is possible to build this situation manually with access to
-                            // multiple accounts.
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "bad user_id in link cookie",
-                            ));
-                        }
-
-                        // finally, this is our condition we allow linking for existing accs
-                        if link.user_email != user.email {
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "Invalid E-Mail",
-                            ));
-                        }
-
-                        // If we got here, everything was fine, and we can create the link.
-                        // No need to `.save()` here, will be done later anyway with other updates.
-                        user.auth_provider_id = Some(provider.id.clone());
-                        user.federation_uid = Some(claims_user_id.clone());
-
-                        (Some(user), NewFederatedUserCreated::No)
-                    } else if provider.auto_link
-                        && user.federation_uid.is_none()
-                        && user.auth_provider_id.is_none()
+                    // `auto_link` only ever links an account that has no provider link at all.
+                    // An account with a link of its own, or with the same email as another
+                    // identity, is refused instead of merged.
+                    if provider.auto_link && IdentityLink::find_by_user(&user.id).await?.is_empty()
                     {
-                        user.auth_provider_id = Some(provider.id.clone());
-                        user.federation_uid = Some(claims_user_id.clone());
-
-                        (Some(user), NewFederatedUserCreated::No)
+                        IdentityLink::link(&user.id, provider, &claims_user_id).await?;
+                        (
+                            Some(User::find(user.id).await?),
+                            NewFederatedUserCreated::No,
+                        )
                     } else {
                         return Err(ErrorResponse::new(
                             ErrorResponseType::Forbidden,
@@ -1285,36 +1341,12 @@ impl AuthProviderIdClaims<'_> {
         let now = Utc::now().timestamp();
         let user = if let Some(mut user) = user_opt {
             let mut old_email = None;
-            let mut forbidden_error = None;
 
-            // validate federation_uid
-            // we must reject any upstream login, if a non-federated local user with the same email
-            // exists, as it could lead to an account takeover
-            if user.federation_uid.is_none()
-                || user.federation_uid.as_deref() != Some(&claims_user_id)
-            {
-                forbidden_error = Some("non-federated user or ID mismatch");
-            }
-
-            // validate auth_provider_id
-            if user.auth_provider_id.as_deref() != Some(&provider.id) {
-                forbidden_error = Some("invalid login from wrong auth provider");
-            }
-
-            if let Some(err) = forbidden_error {
-                user.last_failed_login = Some(now);
-                user.failed_login_attempts =
-                    Some(user.failed_login_attempts.unwrap_or_default() + 1);
-                user.save(old_email).await?;
-
-                return Err(ErrorResponse::new(
-                    ErrorResponseType::Forbidden,
-                    err.to_string(),
-                ));
-            }
-
-            // check / update email
-            if Some(user.email.as_str()) != self.email.as_deref() {
+            // check / update email, from the primary link only: each linked provider may know
+            // the person by another email, and a sign-in through any other must not change it
+            let is_primary = user.auth_provider_id.as_deref() == Some(provider.id.as_str())
+                && user.federation_uid.as_deref() == Some(claims_user_id.as_str());
+            if is_primary && Some(user.email.as_str()) != self.email.as_deref() {
                 old_email = Some(user.email);
                 user.email = self.email.as_ref().unwrap().to_string();
             }
@@ -1389,7 +1421,7 @@ impl AuthProviderIdClaims<'_> {
                 federation_uid: Some(claims_user_id.to_string()),
                 ..Default::default()
             };
-            User::create_federated(new_user).await?
+            User::create_federated(new_user, &provider.issuer).await?
         };
 
         // check if we got additional values from the token

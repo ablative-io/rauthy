@@ -16,12 +16,16 @@
     } from '$api/types/user_attrs';
     import { onMount } from 'svelte';
     import { parseJsonValue, stringifyJsonValue } from '$utils/jsonValue';
+    import AccLinkedProviders from './AccLinkedProviders.svelte';
+    import type { AuthProvidersTemplate } from '$api/templates/AuthProvider.ts';
 
     let {
         user = $bindable(),
+        providers = [],
         viewModePhone,
     }: {
         user: UserResponse;
+        providers?: AuthProvidersTemplate;
         viewModePhone?: boolean;
     } = $props();
 
@@ -81,6 +85,8 @@
 </script>
 
 <div class="container">
+    <AccLinkedProviders bind:user {providers} />
+
     <div>
         {#each attrs as a (a.name)}
             <Input
