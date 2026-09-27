@@ -267,7 +267,7 @@ async fn test_user_picture() -> Result<(), Box<dyn Error>> {
         }],
     };
     let res = client
-        .post(&format!("{}/api_keys", get_backend_url()))
+        .post(format!("{}/api_keys", get_backend_url()))
         .headers(auth_headers.clone())
         .json(&payload)
         .send()

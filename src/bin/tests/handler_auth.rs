@@ -1165,7 +1165,7 @@ async fn validate_token(
 
 async fn validate_token_request(token: String) -> Result<reqwest::Response, Box<dyn Error>> {
     let res = reqwest::Client::new()
-        .post(&format!("{}/oidc/introspect", get_backend_url()))
+        .post(format!("{}/oidc/introspect", get_backend_url()))
         .header(AUTHORIZATION, format!("Bearer {}", token))
         .form(&TokenValidationRequest { token })
         .send()
