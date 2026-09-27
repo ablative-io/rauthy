@@ -15,5 +15,5 @@ leg sh scripts/design/gate.sh
 leg sh .land/ui.sh
 leg cargo fmt --all
 leg cargo clippy --workspace --all-targets -- -D warnings
-leg cargo test --workspace --no-fail-fast
+leg sh .land/test.sh
 exit "$status"

@@ -27,8 +27,8 @@
         },
         {
           "name": "tests",
-          "command": "cargo test --workspace --no-fail-fast",
-          "requires": ["rust-build", "ui-build"],
+          "command": "sh .land/test.sh",
+          "requires": ["rust-build", "ui-build", "tool:curl", "tool:lsof"],
           "cadence": "round"
         },
         {
