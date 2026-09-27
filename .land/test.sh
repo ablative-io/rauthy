@@ -22,11 +22,17 @@ if lsof -nP -iTCP:8081 -sTCP:LISTEN >/dev/null 2>&1; then
 fi
 
 cargo build || exit 1
+# The gate may build into its own target directory, so the binary is found where cargo put it.
+target_dir=$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+if [ -z "$target_dir" ] || [ ! -x "$target_dir/debug/rauthy" ]; then
+  echo "refused: binary_missing. cargo build finished but no rauthy binary is at '$target_dir/debug/rauthy'."
+  exit 1
+fi
 
 mkdir -p data
 rm -rf data/logs data/logs_cache data/state_machine data/state_machine_cache
 backend_log=$(mktemp)
-PUB_URL=localhost:8081 RP_ORIGIN=http://localhost:8081 ./target/debug/rauthy serve -c config-test.toml --test >"$backend_log" 2>&1 &
+PUB_URL=localhost:8081 RP_ORIGIN=http://localhost:8081 "$target_dir/debug/rauthy" serve -c config-test.toml --test >"$backend_log" 2>&1 &
 backend=$!
 stop_backend() {
   kill "$backend" 2>/dev/null
