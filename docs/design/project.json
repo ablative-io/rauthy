@@ -1,0 +1,37 @@
+{
+  "trees": [
+    {
+      "tree": ".",
+      "shorthand": {
+        "rust-build": ["toolchain:rust", "lockfile:Cargo.lock"]
+      },
+      "legs": [
+        {
+          "name": "fmt",
+          "command": "cargo fmt --all",
+          "requires": ["tool:cargo", "tool:rustfmt"],
+          "cadence": "round"
+        },
+        {
+          "name": "clippy",
+          "command": "cargo clippy --workspace --all-targets -- -D warnings",
+          "requires": ["rust-build"],
+          "cadence": "round"
+        },
+        {
+          "name": "tests",
+          "command": "cargo test --workspace --no-fail-fast",
+          "requires": ["rust-build"],
+          "cadence": "round"
+        },
+        {
+          "name": "design",
+          "command": "sh scripts/design/gate.sh",
+          "requires": ["tool:sh", "tool:python3"],
+          "cadence": "round"
+        }
+      ]
+    }
+  ],
+  "roots": {}
+}
