@@ -24,3 +24,6 @@ heaptrack.*
 static
 templates/html
 gen-config.toml
+
+# Built by the ui leg of .land/gates.sh from src/wasm-modules
+/frontend/src/wasm/

@@ -3,9 +3,16 @@
     {
       "tree": ".",
       "shorthand": {
-        "rust-build": ["toolchain:rust", "lockfile:Cargo.lock"]
+        "rust-build": ["toolchain:rust", "lockfile:Cargo.lock"],
+        "ui-build": ["tool:wasm-pack", "tool:npm", "target:wasm32-unknown-unknown", "lockfile:frontend/package-lock.json"]
       },
       "legs": [
+        {
+          "name": "ui",
+          "command": "sh .land/ui.sh",
+          "requires": ["ui-build"],
+          "cadence": "round"
+        },
         {
           "name": "fmt",
           "command": "cargo fmt --all",
@@ -15,13 +22,13 @@
         {
           "name": "clippy",
           "command": "cargo clippy --workspace --all-targets -- -D warnings",
-          "requires": ["rust-build"],
+          "requires": ["rust-build", "ui-build"],
           "cadence": "round"
         },
         {
           "name": "tests",
           "command": "cargo test --workspace --no-fail-fast",
-          "requires": ["rust-build"],
+          "requires": ["rust-build", "ui-build"],
           "cadence": "round"
         },
         {
