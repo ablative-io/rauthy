@@ -10,8 +10,6 @@ use crate::entity::email_jobs::EmailJob;
 use crate::entity::failed_backchannel_logout::FailedBackchannelLogout;
 use crate::entity::failed_scim_tasks::FailedScimTask;
 use crate::entity::groups::Group;
-use crate::entity::identity_link_audit::IdentityLinkAudit;
-use crate::entity::identity_links::IdentityLink;
 use crate::entity::issued_tokens::IssuedToken;
 use crate::entity::jwk::Jwk;
 use crate::entity::kv::{KVAccess, KVNamespace, KVValue};
@@ -1705,86 +1703,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 }
 
 /// Must run after `users()`, which removes every link together with the users it deletes.
-pub async fn identity_links(data_before: Vec<IdentityLink>) -> Result<(), ErrorResponse> {
-    let sql_1 = "DELETE FROM identity_links";
-    let sql_2 = r#"
-INSERT INTO identity_links (provider_id, federation_uid, user_id, created)
-VALUES ($1, $2, $3, $4)"#;
-
-    if is_hiqlite() {
-        DB::hql().execute(sql_1, params!()).await?;
-        for b in data_before {
-            DB::hql()
-                .execute(
-                    sql_2,
-                    params!(b.provider_id, b.federation_uid, b.user_id, b.created),
-                )
-                .await?;
-        }
-    } else {
-        DB::pg_execute(sql_1, &[]).await?;
-        for b in data_before {
-            DB::pg_execute(
-                sql_2,
-                &[&b.provider_id, &b.federation_uid, &b.user_id, &b.created],
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-pub async fn identity_link_audit(data_before: Vec<IdentityLinkAudit>) -> Result<(), ErrorResponse> {
-    let sql_1 = "DELETE FROM identity_link_audit";
-    let sql_2 = r#"
-INSERT INTO identity_link_audit
-(id, user_id, provider_id, issuer, federation_uid, link_change, observed_at, receipt,
-acknowledged_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#;
-
-    if is_hiqlite() {
-        DB::hql().execute(sql_1, params!()).await?;
-        for b in data_before {
-            DB::hql()
-                .execute(
-                    sql_2,
-                    params!(
-                        b.id,
-                        b.user_id,
-                        b.provider_id,
-                        b.issuer,
-                        b.federation_uid,
-                        b.link_change,
-                        b.observed_at,
-                        b.receipt,
-                        b.acknowledged_at
-                    ),
-                )
-                .await?;
-        }
-    } else {
-        DB::pg_execute(sql_1, &[]).await?;
-        for b in data_before {
-            DB::pg_execute(
-                sql_2,
-                &[
-                    &b.id,
-                    &b.user_id,
-                    &b.provider_id,
-                    &b.issuer,
-                    &b.federation_uid,
-                    &b.link_change,
-                    &b.observed_at,
-                    &b.receipt,
-                    &b.acknowledged_at,
-                ],
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
 pub async fn users_values(data_before: Vec<UserValues>) -> Result<(), ErrorResponse> {
     let sql_1 = "DELETE FROM users_values";
     let sql_2 = r#"

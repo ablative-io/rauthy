@@ -11,8 +11,6 @@ use crate::entity::email_jobs::{EmailContentType, EmailJob, EmailJobFilter, Emai
 use crate::entity::failed_backchannel_logout::FailedBackchannelLogout;
 use crate::entity::failed_scim_tasks::FailedScimTask;
 use crate::entity::groups::Group;
-use crate::entity::identity_link_audit::IdentityLinkAudit;
-use crate::entity::identity_links::IdentityLink;
 use crate::entity::issued_tokens::IssuedToken;
 use crate::entity::jwk::Jwk;
 use crate::entity::kv::{KVAccess, KVNamespace, KVValue};
@@ -82,6 +80,7 @@ pub async fn migrate_from_sqlite(db_from: &str) -> Result<(), ErrorResponse> {
     let conn = rusqlite::Connection::open(url)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    let identity_links = super::identity_links::IdentityTransfer::from_sqlite(&conn)?;
 
     // before doing anything, make sure that we are on the same feature version
     let mut res = DB::hql()
@@ -128,15 +127,6 @@ pub async fn migrate_from_sqlite(db_from: &str) -> Result<(), ErrorResponse> {
     inserts::users(before).await?;
 
     // IDENTITY LINKS
-    debug!("Migrating table: identity_links");
-    let before = query_sqlite::<IdentityLink>(&conn, "SELECT * FROM identity_links").await?;
-    inserts::identity_links(before).await?;
-
-    // IDENTITY LINK AUDIT
-    debug!("Migrating table: identity_link_audit");
-    let before =
-        query_sqlite::<IdentityLinkAudit>(&conn, "SELECT * FROM identity_link_audit").await?;
-    inserts::identity_link_audit(before).await?;
 
     // PASSKEYS
     debug!("Migrating table: passkeys");
@@ -296,6 +286,7 @@ pub async fn migrate_from_sqlite(db_from: &str) -> Result<(), ErrorResponse> {
         .map(|r| r.unwrap())
         .collect_vec();
     inserts::sessions(before).await?;
+    identity_links.write().await?;
 
     // USER LOGIN STATES
     debug!("Migrating table: user_login_states");
@@ -629,6 +620,7 @@ pub async fn migrate_from_postgres() -> Result<(), ErrorResponse> {
     let db_name = vars.migrate_pg_db_name.as_ref();
     let pool = DB::connect_postgres(host, vars.migrate_pg_port, user, password, db_name, 1).await?;
     let cl = pool.get().await?;
+    let identity_links = super::identity_links::IdentityTransfer::from_postgres(&cl).await?;
 
     // before doing anything, make sure that we are on the same feature version
     let mut rows: Vec<ConfigEntity> =
@@ -678,14 +670,6 @@ pub async fn migrate_from_postgres() -> Result<(), ErrorResponse> {
     inserts::users(before).await?;
 
     // IDENTITY LINKS
-    debug!("Migrating table: identity_links");
-    let before = DB::pg_query_map_with(&cl, "SELECT * FROM identity_links", &[], 2).await?;
-    inserts::identity_links(before).await?;
-
-    // IDENTITY LINK AUDIT
-    debug!("Migrating table: identity_link_audit");
-    let before = DB::pg_query_map_with(&cl, "SELECT * FROM identity_link_audit", &[], 2).await?;
-    inserts::identity_link_audit(before).await?;
 
     // PASSKEYS
     debug!("Migrating table: passkeys");
@@ -803,6 +787,7 @@ pub async fn migrate_from_postgres() -> Result<(), ErrorResponse> {
     debug!("Migrating table: sessions");
     let before = DB::pg_query_map_with(&cl, "SELECT * FROM sessions", &[], 16).await?;
     inserts::sessions(before).await?;
+    identity_links.write().await?;
 
     // USER LOGIN STATES
     debug!("Migrating table: user_login_states");

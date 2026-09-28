@@ -208,7 +208,7 @@
             client_secret_basic: config.client_secret_basic,
             client_secret_post: config.client_secret_post,
             auto_onboarding: config.auto_onboarding,
-            auto_link: config.auto_link,
+            auto_link: false,
 
             client_id: config.client_id,
             client_secret: config.client_secret,

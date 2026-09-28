@@ -35,7 +35,10 @@ pub async fn login_start<'a>(
     let client = Client::find(payload.client_id).await?;
 
     let slf = AuthProviderCallback {
-        callback_id: secure_random_alnum(32),
+        callback_id: link.as_ref().map_or_else(
+            || secure_random_alnum(32),
+            |intent| intent.callback_id.clone(),
+        ),
         xsrf_token: secure_random_alnum(32),
         typ: provider.typ,
 

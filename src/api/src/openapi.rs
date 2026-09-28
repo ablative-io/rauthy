@@ -40,6 +40,8 @@ use utoipa::{OpenApi, openapi};
         auth_providers::post_provider_login,
         auth_providers::post_provider_callback,
         auth_providers::post_provider_link,
+        auth_providers::get_provider_link_operations,
+        auth_providers::prepare_provider_link,
         auth_providers::delete_provider_link,
         auth_providers::delete_provider_link_by_id,
         auth_providers::get_provider_links,

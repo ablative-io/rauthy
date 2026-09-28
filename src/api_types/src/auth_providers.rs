@@ -237,7 +237,7 @@ pub struct ProviderLinkAuditResponse {
     /// The upstream provider's subject for the linked login.
     pub subject: String,
     /// This Rauthy instance's issuer, which observed the change.
-    pub observer: String,
+    pub observer: Option<String>,
     /// Unix timestamp in seconds
     pub observed_at: i64,
     pub state: ProviderLinkAuditState,
@@ -267,4 +267,29 @@ pub struct ProviderLookupResponse {
     pub use_pkce: bool,
     pub client_secret_basic: bool,
     pub client_secret_post: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ProviderLinkRequest {
+    pub intent_id: String,
+    #[serde(flatten)]
+    pub login: ProviderLoginRequest,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ProviderLinkIntentResponse {
+    pub intent_id: String,
+    pub expires_at: i64,
+}
+
+/// An explicit removal retains its identity through a lost HTTP response.
+#[derive(Debug, Deserialize, Serialize, Validate, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderUnlinkRequest {
+    #[validate(length(min = 1, max = 128))]
+    pub operation_id: String,
+    #[validate(length(min = 1, max = 128))]
+    pub provider_id: String,
+    #[validate(length(min = 1))]
+    pub subject: String,
 }

@@ -130,6 +130,8 @@ pub struct ProviderLinkIntent {
     pub user_id: String,
     pub session_id: String,
     pub nonce: String,
+    pub intent_id: String,
+    pub callback_id: String,
 }
 
 /// Upstream Auth Provider for upstream logins without a local Rauthy account
@@ -344,7 +346,8 @@ WHERE l.provider_id = $1"#;
                         &a.issuer,
                         &a.federation_uid,
                         &a.link_change,
-                        a.observed_at
+                        a.observed_at,
+                        &a.observer
                     ),
                 ));
             }
@@ -370,6 +373,7 @@ WHERE l.provider_id = $1"#;
                         &a.federation_uid,
                         &a.link_change,
                         &a.observed_at,
+                        &a.observer,
                     ],
                 )
                 .await?;
@@ -492,6 +496,12 @@ impl AuthProvider {
     }
 
     fn try_from_id_req(id: String, req: ProviderRequest) -> Result<Self, ErrorResponse> {
+        if req.auto_link {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                "auto_link is refused: connect another sign-in method explicitly from the signed-in account",
+            ));
+        }
         let scope = Self::cleanup_scope(&req.scope);
         let secret = Self::secret_encrypted(&req.client_secret)?;
 
@@ -836,6 +846,18 @@ impl AuthProviderCallback {
             return Err(ErrorResponse::new(ErrorResponseType::Internal, msg));
         }
 
+        if link.is_some()
+            && matches!(
+                provider.typ,
+                AuthProviderType::OIDC | AuthProviderType::Google
+            )
+            && ts.id_token.is_none()
+        {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                "identity_link_nonce_missing: linking with this provider requires an ID token",
+            ));
+        }
         if let Some(id_token) = ts.id_token {
             let claims_bytes = AuthProviderIdClaims::self_as_bytes_from_token(&id_token)?;
 
@@ -845,18 +867,13 @@ impl AuthProviderCallback {
                 AuthProviderIdClaims::check_link_nonce(&claims_bytes, link)?;
             }
 
-            // Some providers like Discord send pretty useless id_tokens that do not even contain
-            // the requested claims. If anything fails to extract at least the bare minimum, we want
-            // to go on and try fetching userinfo using the access token below.
             match AuthProviderIdClaims::try_from(claims_bytes.as_slice()) {
-                Ok(claims) => match claims.validate_update_user(provider, link).await {
-                    Ok(res) => return Ok(res),
-                    Err(err) => {
-                        debug!("Error validating the user extracted from the id_claims: {err}");
-                    }
-                },
-                Err(err) => {
-                    debug!("Failed to extract claims from id_token: {err}. Trying access token.");
+                Ok(claims) if claims.has_identity_claims() => {
+                    return claims.validate_update_user(provider, link).await;
+                }
+                Ok(_) => debug!("ID token lacks identity claims; trying userinfo"),
+                Err(error) => {
+                    debug!("ID token claims could not be decoded: {error}; trying userinfo")
                 }
             }
         }
@@ -1095,6 +1112,9 @@ impl<'a> TryFrom<&'a [u8]> for AuthProviderIdClaims<'a> {
 }
 
 impl AuthProviderIdClaims<'_> {
+    fn has_identity_claims(&self) -> bool {
+        self.email.is_some() && (self.sub.is_some() || self.id.is_some() || self.uid.is_some())
+    }
     fn given_name(&self) -> &str {
         if let Some(given_name) = &self.given_name {
             given_name
@@ -1204,55 +1224,67 @@ impl AuthProviderIdClaims<'_> {
         // A link attaches this identity to the account the signed-in person named, never to an
         // account found by email, and changes nothing else about that account.
         if let Some(link) = link {
-            IdentityLink::link(&link.user_id, provider, &claims_user_id).await?;
+            let intent =
+                crate::entity::identity_link_intents::LinkIntent::find(&link.intent_id).await?;
+            intent.validate(
+                &link.user_id,
+                &link.session_id,
+                &provider.id,
+                Utc::now().timestamp(),
+            )?;
+            if intent.callback_id != link.callback_id || intent.nonce != link.nonce {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::Forbidden,
+                    "identity_link_intent_mismatch: callback evidence changed",
+                ));
+            }
+            IdentityLink::check_free(&link.user_id, &provider.id, &claims_user_id).await?;
+            crate::entity::identity_link_admission::LinkAdmission {
+                operation_id: &intent.id,
+                intent_id: &intent.id,
+                user_id: &link.user_id,
+                session_id: &link.session_id,
+                provider_id: &provider.id,
+                callback_id: &link.callback_id,
+                nonce: &link.nonce,
+                issuer: &provider.issuer,
+                subject: &claims_user_id,
+                observer: &RauthyConfig::get().issuer,
+                observed_at: Utc::now().timestamp(),
+            }
+            .commit()
+            .await?;
             let user = User::find(link.user_id.clone()).await?;
             return Ok((user, ProviderMfaLogin::No, NewFederatedUserCreated::No));
         }
 
-        let (user_opt, new_federated_user) = match User::find_by_federation(
-            &provider.id,
-            &claims_user_id,
+        use crate::entity::identity_link_validation::{IdentityLookup, lookup_identity};
+        let email = self.email.as_ref().ok_or_else(|| {
+            ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                "provider identity has no email",
+            )
+        })?;
+        let (user_opt, new_federated_user) = match lookup_identity(
+            User::find_by_federation(&provider.id, &claims_user_id),
+            || User::find_by_email_optional(email.as_ref()),
         )
-        .await
+        .await?
         {
-            Ok(user) => {
-                debug!("found already existing user by federation lookup: {user:?}");
-                (Some(user), NewFederatedUserCreated::No)
+            IdentityLookup::Linked(user) => (Some(user), NewFederatedUserCreated::No),
+            IdentityLookup::Email(_) => {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::Forbidden,
+                    "identity_link_explicit_required: this email already has an account; sign in to that account to link this provider",
+                ));
             }
-            Err(_) => {
-                debug!("did not find already existing user by federation lookup");
-                if let Ok(user) =
-                    User::find_by_email(self.email.as_ref().unwrap().to_string()).await
-                {
-                    // `auto_link` only ever links an account that has no provider link at all.
-                    // An account with a link of its own, or with the same email as another
-                    // identity, is refused instead of merged.
-                    if provider.auto_link && IdentityLink::find_by_user(&user.id).await?.is_empty()
-                    {
-                        IdentityLink::link(&user.id, provider, &claims_user_id).await?;
-                        (
-                            Some(User::find(user.id).await?),
-                            NewFederatedUserCreated::No,
-                        )
-                    } else {
-                        return Err(ErrorResponse::new(
-                            ErrorResponseType::Forbidden,
-                            format!(
-                                "User with email '{}' already exists but is not linked to this provider.",
-                                user.email
-                            ),
-                        ));
-                    }
-                } else if !provider.auto_onboarding {
-                    return Err(ErrorResponse::new(
-                        ErrorResponseType::NotFound,
-                        "User not found",
-                    ));
-                } else {
-                    // a new user will be created further down
-                    (None, NewFederatedUserCreated::Yes)
-                }
+            IdentityLookup::Absent if !provider.auto_onboarding => {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::NotFound,
+                    "User not found",
+                ));
             }
+            IdentityLookup::Absent => (None, NewFederatedUserCreated::Yes),
         };
         debug!("user_opt:\n{:?}", user_opt);
 

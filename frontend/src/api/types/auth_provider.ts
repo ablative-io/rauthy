@@ -151,7 +151,7 @@ export interface ProviderLinkAuditResponse {
     provider_id: string;
     issuer: string;
     subject: string;
-    observer: string;
+    observer: string | null;
     observed_at: number;
     state: ProviderLinkAuditState;
     receipt?: string;
@@ -160,4 +160,9 @@ export interface ProviderLinkAuditResponse {
 
 export interface ProviderLinkAuditAckRequest {
     receipt: string;
+}
+
+export interface ProviderLinkIntentResponse {
+    intent_id: string;
+    expires_at: number;
 }

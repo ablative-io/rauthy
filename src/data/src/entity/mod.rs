@@ -71,3 +71,9 @@ pub async fn is_db_alive() -> bool {
         DB::pg_query_one_row("SELECT 1", &[]).await.is_ok()
     }
 }
+pub mod identity_link_admission;
+pub mod identity_link_intents;
+pub mod identity_link_observation;
+pub mod identity_link_sql;
+pub mod identity_link_unlink;
+pub mod identity_link_validation;

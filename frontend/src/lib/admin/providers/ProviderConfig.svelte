@@ -13,7 +13,6 @@
     import { genKey } from '$utils/helpers';
     import ProviderConfigURLs from '$lib/admin/providers/blocks/ProviderConfigURLs.svelte';
     import ProviderConfigClientInfo from '$lib/admin/providers/blocks/ProviderConfigClientInfo.svelte';
-    import { slide } from 'svelte/transition';
 
     let {
         provider = $bindable(),
@@ -89,7 +88,7 @@
             client_secret_basic: provider.client_secret_basic,
             client_secret_post: provider.client_secret_post,
             auto_onboarding: provider.auto_onboarding,
-            auto_link: provider.auto_link,
+            auto_link: false,
 
             client_id: provider.client_id,
             client_secret: provider.client_secret || undefined,
@@ -131,20 +130,10 @@
                 Auto-Onboarding
             </InputCheckbox>
         </div>
-        <div class="checkbox">
-            <InputCheckbox
-                ariaLabel={ta.providers.config.autoLink}
-                bind:checked={provider.auto_link}
-            >
-                {ta.providers.config.autoLink}
-            </InputCheckbox>
-            {#if provider.auto_link}
-                <div transition:slide={{ duration: 150 }}>
-                    <p>{ta.providers.config.autoLinkDesc1}</p>
-                    <p class="err">{ta.providers.config.autoLinkDesc2}</p>
-                </div>
-            {/if}
-        </div>
+        <p>
+            People connect additional accounts themselves after signing in again. Matching email
+            addresses never join accounts.
+        </p>
 
         <ProviderConfigURLs
             bind:issuer={provider.issuer}

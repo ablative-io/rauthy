@@ -32,6 +32,7 @@ pub async fn post_authorize(
 ) -> Result<AuthStep, ErrorResponse> {
     *add_login_delay = true;
 
+    let authenticated_now = req_data.password.is_some();
     let mut user = match User::find_by_email(req_data.email.clone()).await {
         Ok(u) => u,
         Err(err) => {
@@ -134,6 +135,7 @@ pub async fn post_authorize(
         client,
         &mut session,
         AuthorizeData {
+            authenticated_now,
             redirect_uri: req_data.redirect_uri,
             scopes: req_data.scopes,
             state: req_data.state,
@@ -174,6 +176,7 @@ pub async fn post_authorize_refresh(
         client,
         &mut session,
         AuthorizeData {
+            authenticated_now: false,
             redirect_uri: req_data.redirect_uri,
             scopes: req_data.scopes,
             state: req_data.state,
@@ -193,6 +196,7 @@ pub async fn post_authorize_refresh(
 }
 
 pub(crate) struct AuthorizeData {
+    pub authenticated_now: bool,
     pub redirect_uri: String,
     pub scopes: Option<Vec<String>>,
     pub state: Option<String>,
@@ -299,6 +303,13 @@ pub(crate) async fn finish_authorize(
     } else {
         // password only account
         session.set_authenticated(&user).await?;
+        if data.authenticated_now {
+            rauthy_data::entity::identity_link_intents::record_reauthentication(
+                &session.id,
+                &user.id,
+            )
+            .await?;
+        }
 
         if need_tos_accept {
             let code_await = AuthCodeToSAwait {
