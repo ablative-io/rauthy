@@ -1,6 +1,8 @@
 use crate::api_cookie::ApiCookie;
 use crate::database::{Cache, DB};
-use crate::entity::identity_links::{IdentityLookup, lookup_identity, validate_link_target};
+use crate::entity::identity_links::{
+    IdentityLookup, lookup_identity, validate_link_email, validate_link_target,
+};
 use crate::entity::logos::{Logo, LogoType};
 use crate::entity::users::User;
 use crate::entity::users_values::UserValues;
@@ -794,16 +796,15 @@ impl AuthProviderCallback {
         if let Some(id_token) = ts.id_token {
             let claims_bytes = AuthProviderIdClaims::self_as_bytes_from_token(&id_token)?;
 
-            // Some providers like Discord send pretty useless id_tokens that do not even contain
-            // the requested claims. If anything fails to extract at least the bare minimum, we want
-            // to go on and try fetching userinfo using the access token below.
+            // Userinfo is a fallback for missing identity claims, never for a
+            // refused identity or a failed read/write after identity resolution.
             match AuthProviderIdClaims::try_from(claims_bytes.as_slice()) {
-                Ok(claims) => match claims.validate_update_user(provider, link_cookie).await {
-                    Ok(res) => return Ok(res),
-                    Err(err) => {
-                        debug!("Error validating the user extracted from the id_claims: {err}");
-                    }
-                },
+                Ok(claims) if claims.has_identity_claims() => {
+                    return claims.validate_update_user(provider, link_cookie).await;
+                }
+                Ok(_) => {
+                    debug!("ID token lacks identity claims; trying userinfo");
+                }
                 Err(err) => {
                     debug!("Failed to extract claims from id_token: {err}. Trying access token.");
                 }
@@ -1044,6 +1045,10 @@ impl<'a> TryFrom<&'a [u8]> for AuthProviderIdClaims<'a> {
 }
 
 impl AuthProviderIdClaims<'_> {
+    fn has_identity_claims(&self) -> bool {
+        self.email.is_some() && (self.sub.is_some() || self.id.is_some() || self.uid.is_some())
+    }
+
     fn given_name(&self) -> &str {
         if let Some(given_name) = &self.given_name {
             given_name
@@ -1147,6 +1152,19 @@ impl AuthProviderIdClaims<'_> {
                 (Some(user), NewFederatedUserCreated::No)
             }
             IdentityLookup::Email(mut user) => {
+                if link_cookie.is_some() || provider.auto_link {
+                    validate_link_email(user.email_verified, self.email_verified).map_err(
+                        |reason| {
+                            ErrorResponse::new(
+                                ErrorResponseType::Forbidden,
+                                format!(
+                                    "provider link refused for provider '{}': {reason:?}",
+                                    provider.id
+                                ),
+                            )
+                        },
+                    )?;
+                }
                 if let Some(link) = link_cookie {
                     if link.provider_id != provider.id {
                         return Err(ErrorResponse::new(
@@ -1475,6 +1493,34 @@ impl AuthProviderIdClaims<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ID001_LINK_REFUSAL: complete claims must reach validation and propagate its refusal.
+    #[test]
+    fn complete_identity_claims_do_not_select_userinfo_fallback() -> Result<(), ErrorResponse> {
+        for raw in [
+            br#"{"email":"person@example.test","sub":"google-person"}"#.as_slice(),
+            br#"{"email":"person@example.test","id":123}"#.as_slice(),
+            br#"{"email":"person@example.test","uid":"legacy-person"}"#.as_slice(),
+            br#"{"email":"person@example.test","sub":{}}"#.as_slice(),
+        ] {
+            let claims = AuthProviderIdClaims::try_from(raw)?;
+            assert!(claims.has_identity_claims());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_identity_claims_can_be_obtained_from_userinfo() -> Result<(), ErrorResponse> {
+        for raw in [
+            br#"{"sub":"person"}"#.as_slice(),
+            br#"{"email":"person@example.test"}"#.as_slice(),
+            br#"{}"#.as_slice(),
+        ] {
+            let claims = AuthProviderIdClaims::try_from(raw)?;
+            assert!(!claims.has_identity_claims());
+        }
+        Ok(())
+    }
 
     // exists only to understand the query syntax and experiment with it
     #[test]

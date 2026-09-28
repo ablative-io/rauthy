@@ -16,6 +16,25 @@ pub enum LinkTargetRefusal {
     IdentityAlreadyOwned,
     SessionNotAuthenticated,
     SessionOwnerMismatch,
+    LocalEmailUnverified,
+    ProviderEmailUnverified,
+}
+
+/// Both observations must be verified before email can participate in linking.
+///
+/// # Errors
+/// Refuses an unverified local address or absent/false upstream verification.
+pub fn validate_link_email(
+    local_verified: bool,
+    provider_verified: Option<bool>,
+) -> Result<(), LinkTargetRefusal> {
+    if !local_verified {
+        return Err(LinkTargetRefusal::LocalEmailUnverified);
+    }
+    if provider_verified != Some(true) {
+        return Err(LinkTargetRefusal::ProviderEmailUnverified);
+    }
+    Ok(())
 }
 
 /// Check the requested link even when the provider identity is already known.
@@ -89,8 +108,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        IdentityLookup, LinkTargetRefusal, lookup_identity, validate_link_session,
-        validate_link_target,
+        IdentityLookup, LinkTargetRefusal, lookup_identity, validate_link_email,
+        validate_link_session, validate_link_target,
     };
     use std::cell::Cell;
     use std::future::{Future, ready};
@@ -213,5 +232,22 @@ mod tests {
             validate_link_session(true, Some("person-a"), "person-a"),
             Ok(())
         );
+    }
+
+    #[test]
+    fn an_unverified_or_unreported_email_cannot_authorize_linking() {
+        assert_eq!(
+            validate_link_email(false, Some(true)),
+            Err(LinkTargetRefusal::LocalEmailUnverified)
+        );
+        assert_eq!(
+            validate_link_email(true, Some(false)),
+            Err(LinkTargetRefusal::ProviderEmailUnverified)
+        );
+        assert_eq!(
+            validate_link_email(true, None),
+            Err(LinkTargetRefusal::ProviderEmailUnverified)
+        );
+        assert_eq!(validate_link_email(true, Some(true)), Ok(()));
     }
 }
