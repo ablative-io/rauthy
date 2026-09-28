@@ -1,9 +1,8 @@
+//! Provider relations, stable primary projection and explicit mutation admission.
 use crate::database::DB;
 use crate::entity::auth_providers::AuthProvider;
-use crate::entity::identity_link_audit::{self, IdentityLinkAudit, LinkChange};
+use crate::entity::identity_link_audit::{IdentityLinkAudit, LinkChange};
 use crate::entity::users::User;
-use chrono::Utc;
-use hiqlite::Params;
 use hiqlite::macros::params;
 use rauthy_api_types::auth_providers::{ProviderLinkAuditState, ProviderLinkResponse};
 use rauthy_common::is_hiqlite;
@@ -11,9 +10,6 @@ use rauthy_common::utils::new_store_id;
 use rauthy_derive::FromPgRow;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
 use serde::{Deserialize, Serialize};
-
-/// How long after signing in a person may start linking another provider.
-pub const LINK_REAUTH_MAX_AGE_SECS: i64 = 600;
 
 /// Inserts one link. `$1` provider, `$2` federation uid, `$3` user, `$4` created.
 pub(crate) static SQL_INSERT: &str = r#"
@@ -40,44 +36,6 @@ AND NOT EXISTS (
     AND l.provider_id = users.auth_provider_id
     AND l.federation_uid = users.federation_uid
 )"#;
-
-/// True while the user keeps a way to sign in without the link `$2`: another link, a password
-/// or a passkey. `$1` user.
-macro_rules! keeps_another_method {
-    () => {
-        r#"(
-    (SELECT COUNT(*) FROM identity_links WHERE user_id = $1) > 1
-    OR EXISTS (
-        SELECT 1 FROM users
-        WHERE id = $1 AND (password IS NOT NULL OR webauthn_user_id IS NOT NULL)
-    )
-)"#
-    };
-}
-
-/// Records the unlink of `$2` from `$1` while the user keeps another method. `$3` id, `$4`
-/// issuer, `$5` observed at.
-///
-/// SQLite numbers `$n` parameters in the order they first appear, so they appear here in
-/// ascending order.
-static SQL_AUDIT_UNLINK: &str = concat!(
-    r#"
-INSERT INTO identity_link_audit
-(user_id, provider_id, id, issuer, federation_uid, link_change, observed_at)
-SELECT CAST($1 AS VARCHAR), CAST($2 AS VARCHAR), CAST($3 AS VARCHAR), CAST($4 AS VARCHAR),
-    federation_uid, 'unlinked', CAST($5 AS BIGINT)
-FROM identity_links
-WHERE user_id = $1 AND provider_id = $2 AND "#,
-    keeps_another_method!()
-);
-
-/// Removes the link `$2` from `$1` while the user keeps another method.
-static SQL_DELETE_GUARDED: &str = concat!(
-    r#"
-DELETE FROM identity_links
-WHERE user_id = $1 AND provider_id = $2 AND "#,
-    keeps_another_method!()
-);
 
 /// One upstream provider identity linked to one user.
 ///
@@ -170,146 +128,37 @@ ORDER BY created ASC, provider_id ASC"#;
         Ok(())
     }
 
-    /// Links (`provider`, `federation_uid`) to `user_id` and records the observation in the same
-    /// transaction.
-    pub async fn link(
+    /// Remove an explicitly named identity using a client-retained operation ID.
+    /// A retry observes its original result rather than minting another operation.
+    pub async fn unlink(
         user_id: &str,
-        provider: &AuthProvider,
-        federation_uid: &str,
+        session_id: &str,
+        request: &rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     ) -> Result<(), ErrorResponse> {
-        Self::check_free(user_id, &provider.id, federation_uid).await?;
-
-        let now = Utc::now().timestamp();
-        let op = new_store_id();
-        let change = LinkChange::Linked.as_str();
-
-        if is_hiqlite() {
-            let txn: Vec<(&str, Params)> = vec![
-                (
-                    SQL_INSERT,
-                    params!(&provider.id, federation_uid, user_id, now),
-                ),
-                (
-                    identity_link_audit::SQL_INSERT,
-                    params!(
-                        &op,
-                        user_id,
-                        &provider.id,
-                        &provider.issuer,
-                        federation_uid,
-                        change,
-                        now
-                    ),
-                ),
-                (SQL_PRIMARY, params!(user_id)),
-            ];
-            for res in DB::hql()
-                .txn(txn)
-                .await
-                .map_err(|err| map_taken(ErrorResponse::from(err)))?
-            {
-                res.map_err(|err| map_taken(ErrorResponse::from(err)))?;
-            }
-        } else {
-            let mut cl = DB::pg().await?;
-            let txn = cl.transaction().await?;
-            DB::pg_txn_append(
-                &txn,
-                SQL_INSERT,
-                &[&provider.id, &federation_uid, &user_id, &now],
-            )
-            .await
-            .map_err(map_taken)?;
-            DB::pg_txn_append(
-                &txn,
-                identity_link_audit::SQL_INSERT,
-                &[
-                    &op,
-                    &user_id,
-                    &provider.id,
-                    &provider.issuer,
-                    &federation_uid,
-                    &change,
-                    &now,
-                ],
-            )
-            .await?;
-            DB::pg_txn_append(&txn, SQL_PRIMARY, &[&user_id]).await?;
-            txn.commit().await.map_err(|err| map_taken(err.into()))?;
+        use crate::entity::identity_link_observation::LinkAudit;
+        use crate::entity::identity_link_unlink::UnlinkAdmission;
+        if let Some(original) = LinkAudit::find(&request.operation_id).await? {
+            original.matches_request(
+                user_id,
+                &request.provider_id,
+                &request.subject,
+                "unlinked",
+            )?;
+            return Ok(());
         }
-
-        invalidate_user(user_id).await
-    }
-
-    /// Removes the link to `provider_id` from `user_id` and records the observation in the same
-    /// transaction.
-    ///
-    /// Refused while the link is the user's last way to sign in: a user keeps another link, a
-    /// password or a passkey. The same condition guards the statements themselves, so two
-    /// concurrent unlinks never remove the last method between them.
-    pub async fn unlink(user_id: &str, provider_id: &str) -> Result<(), ErrorResponse> {
-        let user = User::find(user_id.to_string()).await?;
-        let links = Self::find_by_user(user_id).await?;
-        if !links.iter().any(|l| l.provider_id == provider_id) {
-            return Err(ErrorResponse::new(
-                ErrorResponseType::NotFound,
-                "identity_link_unknown: you have no link to this provider",
-            ));
+        let provider = AuthProvider::find(&request.provider_id).await?;
+        UnlinkAdmission {
+            operation_id: &request.operation_id,
+            user_id,
+            session_id,
+            provider_id: &request.provider_id,
+            issuer: &provider.issuer,
+            subject: &request.subject,
+            observer: &crate::rauthy_config::RauthyConfig::get().issuer,
+            observed_at: chrono::Utc::now().timestamp(),
         }
-        check_keeps_method(
-            links.len(),
-            user.password.is_some(),
-            user.has_webauthn_enabled(),
-        )?;
-
-        let provider = AuthProvider::find(provider_id).await?;
-        let now = Utc::now().timestamp();
-        let op = new_store_id();
-
-        let removed = if is_hiqlite() {
-            let txn: Vec<(&str, Params)> = vec![
-                (
-                    SQL_AUDIT_UNLINK,
-                    params!(user_id, provider_id, &op, &provider.issuer, now),
-                ),
-                (SQL_DELETE_GUARDED, params!(user_id, provider_id)),
-                (SQL_PRIMARY, params!(user_id)),
-            ];
-            let mut removed = 0;
-            for (idx, res) in DB::hql().txn(txn).await?.into_iter().enumerate() {
-                let rows = res?;
-                if idx == 1 {
-                    removed = rows;
-                }
-            }
-            removed as u64
-        } else {
-            let mut cl = DB::pg().await?;
-            let txn = cl.transaction().await?;
-            // serializes concurrent link changes of this user
-            let st = txn
-                .prepare("SELECT 1 FROM users WHERE id = $1 FOR UPDATE")
-                .await?;
-            txn.query(&st, &[&user_id]).await?;
-            DB::pg_txn_append(
-                &txn,
-                SQL_AUDIT_UNLINK,
-                &[&user_id, &provider_id, &op, &provider.issuer, &now],
-            )
-            .await?;
-            let removed =
-                DB::pg_txn_append(&txn, SQL_DELETE_GUARDED, &[&user_id, &provider_id]).await?;
-            DB::pg_txn_append(&txn, SQL_PRIMARY, &[&user_id]).await?;
-            txn.commit().await?;
-            removed
-        };
-
-        invalidate_user(user_id).await?;
-        if removed == 1 {
-            Ok(())
-        } else {
-            Err(refused_last_method())
-        }
+        .commit()
+        .await
     }
 
     /// One unlink observation for each of `links`, for a deletion that removes them together
@@ -325,6 +174,9 @@ ORDER BY created ASC, provider_id ASC"#;
                 federation_uid: l.federation_uid.clone(),
                 link_change: LinkChange::Unlinked.as_str().to_string(),
                 observed_at: now,
+                observer: Some(crate::rauthy_config::RauthyConfig::get().issuer.clone()),
+                actor_session: None,
+                lys_person: None,
                 receipt: None,
                 acknowledged_at: None,
             })
@@ -376,59 +228,11 @@ fn link_audit_state(link: &IdentityLink, audits: &[IdentityLinkAudit]) -> Provid
         .unwrap_or(ProviderLinkAuditState::Pending)
 }
 
-/// Refuses to start a link unless the person signed in within [`LINK_REAUTH_MAX_AGE_SECS`].
-pub fn check_fresh_authentication(last_login: Option<i64>, now: i64) -> Result<(), ErrorResponse> {
-    match last_login {
-        Some(ts) if ts <= now && now - ts <= LINK_REAUTH_MAX_AGE_SECS => Ok(()),
-        _ => Err(ErrorResponse::new(
-            ErrorResponseType::PreconditionRequired,
-            format!(
-                "identity_link_reauth_required: sign in again, then link the provider within \
-                {LINK_REAUTH_MAX_AGE_SECS} seconds"
-            ),
-        )),
-    }
-}
-
-/// Refuses to remove a link that is the user's last way to sign in.
-pub fn check_keeps_method(
-    links: usize,
-    has_password: bool,
-    has_passkey: bool,
-) -> Result<(), ErrorResponse> {
-    if links > 1 || has_password || has_passkey {
-        Ok(())
-    } else {
-        Err(refused_last_method())
-    }
-}
-
-fn refused_last_method() -> ErrorResponse {
-    ErrorResponse::new(
-        ErrorResponseType::BadRequest,
-        "identity_link_last_method: set up a password, a passkey or another provider link \
-        before you remove this one",
-    )
-}
-
 fn refused_taken() -> ErrorResponse {
     ErrorResponse::new(
         ErrorResponseType::Forbidden,
         "identity_link_taken: this provider identity is linked to another account",
     )
-}
-
-fn map_taken(err: ErrorResponse) -> ErrorResponse {
-    if err.message.contains("UNIQUE") || err.message.contains("unique constraint") {
-        refused_taken()
-    } else {
-        err
-    }
-}
-
-async fn invalidate_user(user_id: &str) -> Result<(), ErrorResponse> {
-    let user = User::find(user_id.to_string()).await?;
-    User::invalidate_cache(&user.id, &user.email).await
 }
 
 #[cfg(test)]
@@ -552,7 +356,12 @@ VALUES ('userLocal', 'local@test', 'Local', '', 1, 1, 200, 'en');
         );
 
         let fork_pg: Vec<_> = pg.range(BASE_HIGHEST_POSTGRES + 1..).collect();
-        assert_eq!(fork_pg.len(), 1, "one fork migration on the postgres side");
+        assert_eq!(
+            fork_pg.len(),
+            2,
+            "original and forward admission migrations"
+        );
+        assert_eq!(fork_pg[1].1, "V32__identity_link_admission.sql");
         let (pg_num, pg_name) = fork_pg[0];
         assert_eq!(pg_name, &format!("V{pg_num}__identity_links.sql"));
         assert!(
@@ -561,7 +370,11 @@ VALUES ('userLocal', 'local@test', 'Local', '', 1, 1, 200, 'en');
         );
 
         let fork_hql: Vec<_> = hql.range(BASE_HIGHEST_HIQLITE + 1..).collect();
-        assert_eq!(fork_hql.len(), 1, "one fork migration on the hiqlite side");
+        assert_eq!(
+            fork_hql.len(),
+            1,
+            "the original hiqlite migration stays unchanged"
+        );
         let (hql_num, hql_name) = fork_hql[0];
         assert_eq!(*hql_num, BASE_HIGHEST_HIQLITE + 1);
         assert_eq!(hql_name, &format!("{hql_num}_identity_links.sql"));
@@ -683,101 +496,6 @@ VALUES ('userLocal', 'local@test', 'Local', '', 1, 1, 200, 'en');
         assert_eq!(links(&conn).len(), 1, "no unintended link");
     }
 
-    /// ID001_LINK_REFUSAL: the guarded unlink never removes the last way to sign in, and the
-    /// primary pair follows the oldest remaining link.
-    #[test]
-    fn id001_link_refusal_final_unlink_is_refused_in_storage() {
-        println!("ID001_LINK_REFUSAL");
-        let conn = open_seeded();
-        conn.execute_batch(&identity_links_sql()).unwrap();
-        conn.execute_batch(
-            r#"
-INSERT INTO auth_providers (id, name, enabled, typ, issuer, authorization_endpoint,
-    token_endpoint, userinfo_endpoint, client_id, scope, use_pkce, client_secret_basic,
-    client_secret_post, auto_onboarding, auto_link)
-VALUES ('github', 'GitHub', 1, 'github', 'https://github.test', 'https://g.test/auth',
-    'https://g.test/token', 'https://g.test/userinfo', 'client', 'user', 1, 0, 0, 0, 0);
-INSERT INTO identity_links (provider_id, federation_uid, user_id, created)
-VALUES ('github', 'github-sub-1', 'userLinked', 150);
-"#,
-        )
-        .unwrap();
-
-        let unlink = |provider: &str| -> usize {
-            let audited = conn
-                .execute(
-                    SQL_AUDIT_UNLINK,
-                    rusqlite::params!["userLinked", provider, new_store_id(), "iss", 1],
-                )
-                .unwrap();
-            let removed = conn
-                .execute(
-                    SQL_DELETE_GUARDED,
-                    rusqlite::params!["userLinked", provider],
-                )
-                .unwrap();
-            conn.execute(SQL_PRIMARY, rusqlite::params!["userLinked"])
-                .unwrap();
-            assert_eq!(
-                audited, removed,
-                "an unlink is audited exactly when it happens"
-            );
-            removed
-        };
-        let primary = || -> Option<String> {
-            conn.query_row(
-                "SELECT auth_provider_id FROM users WHERE id = 'userLinked'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap()
-        };
-
-        conn.execute(SQL_PRIMARY, rusqlite::params!["userLinked"])
-            .unwrap();
-        assert_eq!(
-            primary().as_deref(),
-            Some("google"),
-            "a new link leaves the primary alone"
-        );
-
-        assert_eq!(unlink("google"), 1, "a second link keeps a way to sign in");
-        assert_eq!(primary().as_deref(), Some("github"), "the primary moves");
-        assert_eq!(unlink("github"), 0, "the last link is not removed");
-        assert_eq!(primary().as_deref(), Some("github"));
-
-        conn.execute(
-            "UPDATE users SET password = 'hash' WHERE id = 'userLinked'",
-            [],
-        )
-        .unwrap();
-        assert_eq!(unlink("github"), 1, "a password is another way to sign in");
-        assert_eq!(primary(), None, "no link left clears the pair");
-    }
-
-    #[test]
-    fn fresh_authentication_is_required_to_start_a_link() {
-        let now = 1_000_000;
-        assert!(check_fresh_authentication(Some(now), now).is_ok());
-        assert!(check_fresh_authentication(Some(now - LINK_REAUTH_MAX_AGE_SECS), now).is_ok());
-        let err =
-            check_fresh_authentication(Some(now - LINK_REAUTH_MAX_AGE_SECS - 1), now).unwrap_err();
-        assert!(err.message.starts_with("identity_link_reauth_required"));
-        assert!(check_fresh_authentication(None, now).is_err());
-        assert!(check_fresh_authentication(Some(now + 5), now).is_err());
-    }
-
-    /// ID001_LINK_REFUSAL: removing the only link of an account without a password or passkey
-    /// is refused.
-    #[test]
-    fn id001_link_refusal_keeps_a_method() {
-        println!("ID001_LINK_REFUSAL");
-        assert!(check_keeps_method(1, false, false).is_err());
-        assert!(check_keeps_method(2, false, false).is_ok());
-        assert!(check_keeps_method(1, true, false).is_ok());
-        assert!(check_keeps_method(1, false, true).is_ok());
-    }
-
     #[test]
     fn a_link_reads_as_acknowledged_only_from_its_own_latest_observation() {
         let link = IdentityLink {
@@ -795,6 +513,9 @@ VALUES ('github', 'github-sub-1', 'userLinked', 150);
                 federation_uid: "sub".to_string(),
                 link_change: change.as_str().to_string(),
                 observed_at: at,
+                observer: Some("https://observer.test".into()),
+                actor_session: None,
+                lys_person: None,
                 receipt: receipt.map(String::from),
                 acknowledged_at: receipt.map(|_| at),
             };

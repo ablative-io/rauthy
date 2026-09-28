@@ -1,5 +1,5 @@
+//! Immutable link observations retain original provenance and receiver acknowledgement.
 use crate::database::DB;
-use crate::rauthy_config::RauthyConfig;
 use chrono::Utc;
 use hiqlite::macros::params;
 use rauthy_api_types::auth_providers::{
@@ -14,11 +14,11 @@ use serde::{Deserialize, Serialize};
 pub const RECEIPT_MAX_BYTES: usize = 16384;
 
 /// Inserts one observation. `$1` id, `$2` user, `$3` provider, `$4` issuer, `$5` federation
-/// uid, `$6` change, `$7` observed at.
+/// uid, `$6` change, `$7` observed at, `$8` original observer.
 pub(crate) static SQL_INSERT: &str = r#"
 INSERT INTO identity_link_audit
-(id, user_id, provider_id, issuer, federation_uid, link_change, observed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)"#;
+(id, user_id, provider_id, issuer, federation_uid, link_change, observed_at, observer)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#;
 
 /// A link or an unlink as the change it records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +65,9 @@ pub struct IdentityLinkAudit {
     pub federation_uid: String,
     pub link_change: String,
     pub observed_at: i64,
+    pub observer: Option<String>,
+    pub actor_session: Option<String>,
+    pub lys_person: Option<String>,
     pub receipt: Option<String>,
     pub acknowledged_at: Option<i64>,
 }
@@ -171,7 +174,7 @@ WHERE id = $3 AND acknowledged_at IS NULL"#;
             provider_id: self.provider_id,
             issuer: self.issuer,
             subject: self.federation_uid,
-            observer: RauthyConfig::get().issuer.clone(),
+            observer: self.observer,
             observed_at: self.observed_at,
             state,
             receipt: self.receipt,
@@ -211,6 +214,9 @@ mod tests {
             federation_uid: "subject1".to_string(),
             link_change: LinkChange::Linked.as_str().to_string(),
             observed_at: 1,
+            observer: Some("https://observer.test".into()),
+            actor_session: None,
+            lys_person: None,
             receipt: receipt.map(String::from),
             acknowledged_at: receipt.map(|_| 2),
         }

@@ -879,6 +879,11 @@ pub async fn auth_finish(
                 }
 
                 session.set_authenticated(&user).await?;
+                crate::entity::identity_link_intents::record_reauthentication(
+                    &session.id,
+                    &user.id,
+                )
+                .await?;
                 user.save_login(None).await?;
             }
 

@@ -224,9 +224,18 @@ impl DB {
     }
 
     pub async fn migrate() -> Result<(), ErrorResponse> {
+        if is_hiqlite() {
+            return Err(ErrorResponse::new(
+                rauthy_error::ErrorResponseType::BadRequest,
+                "identity_datastore_refused: this Lys fork requires PostgreSQL; set HIQLITE=false (Hiqlite remains the internal cache)",
+            ));
+        }
+
         // before we do any db migrations, we need to check the current DB version
         // for compatibility
         let db_version = DbVersion::check_app_version().await?;
+        crate::migration::identity_link_format::check_before_migration().await?;
+        crate::migration::identity_link_format::check_legacy_pairs().await?;
 
         if is_hiqlite() {
             Self::hql().migrate::<MigrationsHiqlite>().await?;

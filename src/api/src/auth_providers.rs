@@ -3,8 +3,6 @@ use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::web::{Json, Query};
 use actix_web::{HttpRequest, HttpResponse, delete, get, post, put, web};
 use actix_web_lab::__reexports::futures_util::StreamExt;
-use chrono::Utc;
-use cryptr::utils::secure_random_alnum;
 use rauthy_api_types::auth_providers::{
     ProviderCallbackRequest, ProviderLinkAuditAckRequest, ProviderLinkAuditResponse,
     ProviderLinkResponse, ProviderLinkedUserResponse, ProviderLoginRequest, ProviderLookupRequest,
@@ -17,7 +15,7 @@ use rauthy_common::constants::{HEADER_JSON, PROVIDER_ATPROTO};
 use rauthy_data::entity::api_keys::{AccessGroup, AccessRights};
 use rauthy_data::entity::auth_providers::{AuthProvider, AuthProviderTemplate, ProviderLinkIntent};
 use rauthy_data::entity::identity_link_audit::IdentityLinkAudit;
-use rauthy_data::entity::identity_links::{self, IdentityLink};
+use rauthy_data::entity::identity_links::IdentityLink;
 use rauthy_data::entity::logos::{Logo, LogoType};
 use rauthy_data::entity::pow::PowEntity;
 use rauthy_data::entity::theme::ThemeCssFull;
@@ -188,6 +186,7 @@ pub async fn get_provider_callback_html(req: HttpRequest) -> Result<HttpResponse
         (status = 200, description = "Correct credentials, but needs to continue with Webauthn MFA Login", body = WebauthnLoginResponse),
         (status = 202, description = "Correct credentials and no MFA Login required, adds Location header"),
         (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 403, description = "Forbidden, identity_link_explicit_required when the email already has an account", body = ErrorResponse),
         (status = 404, description = "NotFound", body = ErrorResponse),
     ),
 )]
@@ -235,25 +234,29 @@ pub async fn post_provider_callback_handle(
 
 /// DELETE a link between an existing user account and an upstream provider
 ///
-/// This unlinks the currently logged-in user from its only upstream auth provider link. With
-/// more than one link, use `DELETE /providers/{id}/link` instead. The account must keep
-/// another way to sign in: a password, a passkey or another provider link. Otherwise, this
-/// endpoint will return an error.
+/// The request names the exact provider, subject and retained operation id. The account
+/// must keep another usable way to sign in: a password, a passkey or another provider
+/// link. Retrying an uncertain outcome uses the same request and operation id.
 #[utoipa::path(
     delete,
     path = "/providers/link",
     tag = "providers",
+    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     responses(
         (status = 200, description = "OK", body = UserResponse),
         (status = 400, description = "BadRequest", body = ErrorResponse),
     ),
 )]
 #[delete("/providers/link")]
-pub async fn delete_provider_link(principal: ReqPrincipal) -> Result<HttpResponse, ErrorResponse> {
-    principal.validate_session_auth()?;
-
+pub async fn delete_provider_link(
+    principal: ReqPrincipal,
+    Json(request): Json<rauthy_api_types::auth_providers::ProviderUnlinkRequest>,
+) -> Result<HttpResponse, ErrorResponse> {
+    let session = principal.validate_session_auth()?;
+    request.validate()?;
     let user_id = principal.user_id()?.to_string();
-    let user = User::provider_unlink(user_id).await?;
+    IdentityLink::unlink(&user_id, &session.id, &request).await?;
+    let user = User::find(user_id).await?;
     Ok(HttpResponse::Ok().json(user.into_response(None)))
 }
 
@@ -508,15 +511,14 @@ pub async fn delete_provider_img(
 /// POST a link between an existing user account and an upstream provider
 ///
 /// This starts linking one more upstream provider to the account of the signed-in person. It
-/// needs an authenticated session whose person signed in within the last
-/// `LINK_REAUTH_MAX_AGE_SECS` seconds. The link is completed by the provider's callback in the
+/// needs a durable intent followed by fresh authentication in that same session. The link is completed by the provider's callback in the
 /// same session, is bound to that single callback, and never attaches the upstream identity to
 /// any other account, whatever its email.
 #[utoipa::path(
     post,
     path = "/providers/{id}/link",
     tag = "providers",
-    request_body = ProviderLoginRequest,
+    request_body = rauthy_api_types::auth_providers::ProviderLinkRequest,
     responses(
         (status = 202, description = "Accepted, the Location header leads to the provider"),
         (status = 400, description = "BadRequest", body = ErrorResponse),
@@ -529,9 +531,10 @@ pub async fn delete_provider_img(
 pub async fn post_provider_link(
     provider_id: web::Path<String>,
     principal: ReqPrincipal,
-    Json(payload): Json<ProviderLoginRequest>,
+    Json(request): Json<rauthy_api_types::auth_providers::ProviderLinkRequest>,
 ) -> Result<HttpResponse, ErrorResponse> {
     let session = principal.validate_session_auth()?;
+    let payload = request.login;
     payload.validate()?;
 
     let provider_id = provider_id.into_inner();
@@ -543,13 +546,21 @@ pub async fn post_provider_link(
     }
 
     let user = User::find(principal.user_id()?.to_string()).await?;
-    identity_links::check_fresh_authentication(user.last_login, Utc::now().timestamp())?;
+    let intent = rauthy_data::entity::identity_link_intents::LinkIntent::activate(
+        &request.intent_id,
+        &user.id,
+        &session.id,
+        &provider_id,
+    )
+    .await?;
     IdentityLink::check_provider_free(&user.id, &provider_id).await?;
 
     let link = ProviderLinkIntent {
         user_id: user.id,
         session_id: session.id.clone(),
-        nonce: secure_random_alnum(32),
+        nonce: intent.nonce,
+        intent_id: intent.id,
+        callback_id: intent.callback_id,
     };
 
     // directly redirect to the provider login page
@@ -570,6 +581,7 @@ pub async fn post_provider_link(
     delete,
     path = "/providers/{id}/link",
     tag = "providers",
+    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     responses(
         (status = 200, description = "OK", body = UserResponse),
         (status = 400, description = "BadRequest", body = ErrorResponse),
@@ -580,11 +592,18 @@ pub async fn post_provider_link(
 pub async fn delete_provider_link_by_id(
     provider_id: web::Path<String>,
     principal: ReqPrincipal,
+    Json(request): Json<rauthy_api_types::auth_providers::ProviderUnlinkRequest>,
 ) -> Result<HttpResponse, ErrorResponse> {
-    principal.validate_session_auth()?;
-
+    let session = principal.validate_session_auth()?;
+    request.validate()?;
+    if provider_id.as_str() != request.provider_id {
+        return Err(ErrorResponse::new(
+            ErrorResponseType::BadRequest,
+            "identity_link_provider_mismatch: the body names another provider than the path",
+        ));
+    }
     let user_id = principal.user_id()?.to_string();
-    IdentityLink::unlink(&user_id, &provider_id.into_inner()).await?;
+    IdentityLink::unlink(&user_id, &session.id, &request).await?;
     let user = User::find(user_id).await?;
     Ok(HttpResponse::Ok().json(user.into_response(None)))
 }
@@ -699,4 +718,54 @@ pub async fn post_provider_link_audit_ack(
 
     let audit = IdentityLinkAudit::acknowledge(&id.into_inner(), &payload.receipt).await?;
     Ok(HttpResponse::Ok().json(audit.into_response()?))
+}
+
+/// Prepare before reauthentication; the response cannot itself authorise a link.
+#[utoipa::path(post, path = "/providers/{id}/link/prepare", tag = "providers",
+    responses((status = 201, body = rauthy_api_types::auth_providers::ProviderLinkIntentResponse)))]
+#[post("/providers/{id}/link/prepare")]
+pub async fn prepare_provider_link(
+    provider_id: web::Path<String>,
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    let session = principal.validate_session_auth()?;
+    let user = User::find(principal.user_id()?.to_owned()).await?;
+    user.check_enabled()?;
+    user.check_expired()?;
+    let provider = AuthProvider::find(provider_id.as_str()).await?;
+    if !provider.enabled {
+        return Err(ErrorResponse::new(
+            ErrorResponseType::Forbidden,
+            format!("provider '{}' is disabled", provider.id),
+        ));
+    }
+    IdentityLink::check_provider_free(&user.id, &provider.id).await?;
+    let intent = rauthy_data::entity::identity_link_intents::LinkIntent::prepare(
+        &user.id,
+        &session.id,
+        &provider.id,
+    )
+    .await?;
+    Ok(HttpResponse::Created().json(
+        rauthy_api_types::auth_providers::ProviderLinkIntentResponse {
+            intent_id: intent.id,
+            expires_at: intent.expires_at,
+        },
+    ))
+}
+
+/// Read the signed-in person's own durable operations, including uncertain outcomes.
+#[utoipa::path(get, path = "/providers/links/operations", tag = "providers",
+    responses((status = 200, body = [ProviderLinkAuditResponse])))]
+#[get("/providers/links/operations")]
+pub async fn get_provider_link_operations(
+    principal: ReqPrincipal,
+) -> Result<HttpResponse, ErrorResponse> {
+    principal.validate_session_auth()?;
+    let rows = IdentityLinkAudit::find_by_user(principal.user_id()?)
+        .await?
+        .into_iter()
+        .map(IdentityLinkAudit::into_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(HttpResponse::Ok().json(rows))
 }

@@ -5,6 +5,7 @@ use actix_web::{HttpRequest, cookie};
 use cryptr::EncValue;
 use rauthy_common::constants::CookieMode;
 use rauthy_common::utils::{base64_decode, base64_encode};
+use rauthy_error::{ErrorResponse, ErrorResponseType};
 use std::borrow::Cow;
 use std::fmt::Display;
 use tracing::warn;
@@ -12,6 +13,48 @@ use tracing::warn;
 pub struct ApiCookie;
 
 impl ApiCookie {
+    /// Read an optional cookie without turning malformed authentication into absence.
+    ///
+    /// # Errors
+    /// Names the cookie when decoding, authentication or UTF-8 validation fails.
+    pub fn from_req_checked(
+        req: &HttpRequest,
+        cookie_name: &str,
+    ) -> Result<Option<String>, ErrorResponse> {
+        let name = match RauthyConfig::get().vars.access.cookie_mode {
+            CookieMode::Host => format!("__Host-{cookie_name}"),
+            CookieMode::Secure => format!("__Secure-{cookie_name}"),
+            CookieMode::DangerInsecure => cookie_name.to_owned(),
+        };
+        Self::cookie_into_value_checked(req.cookie(&name)).map_err(|error| {
+            ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                format!(
+                    "invalid authenticated cookie '{cookie_name}': {}",
+                    error.error
+                ),
+            )
+        })
+    }
+
+    fn cookie_into_value_checked(
+        cookie: Option<Cookie<'_>>,
+    ) -> Result<Option<String>, ErrorResponse> {
+        let Some(cookie) = cookie else {
+            return Ok(None);
+        };
+        let bytes = base64_decode(cookie.value())?;
+        let encrypted = EncValue::try_from(bytes)?;
+        let cleartext = encrypted.decrypt()?;
+        let text = std::str::from_utf8(cleartext.as_ref()).map_err(|error| {
+            ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                format!("authenticated cookie is not UTF-8: {error}"),
+            )
+        })?;
+        Ok(Some(text.to_owned()))
+    }
+
     pub fn build<'c, 'b, N, V>(name: N, value: V, max_age: i64) -> Cookie<'c>
     where
         N: Into<Cow<'c, str>> + Display,
@@ -96,5 +139,21 @@ impl ApiCookie {
                 Some(String::from_utf8_lossy(dec.as_ref()).to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod checked_tests {
+    use super::ApiCookie;
+    use actix_web::cookie::Cookie;
+
+    #[test]
+    fn id001_link_refusal_absent_cookie_is_distinct_from_corrupt_cookie() {
+        assert_eq!(ApiCookie::cookie_into_value_checked(None), Ok(None));
+        assert!(ApiCookie::cookie_into_value_checked(Some(Cookie::new("link", "%%%"))).is_err());
+        assert!(
+            ApiCookie::cookie_into_value_checked(Some(Cookie::new("link", "aW52YWxpZA==")))
+                .is_err()
+        );
     }
 }

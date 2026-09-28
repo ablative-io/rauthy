@@ -290,7 +290,8 @@ impl User {
                         issuer,
                         federation_uid,
                         change,
-                        now
+                        now,
+                        &RauthyConfig::get().issuer
                     ),
                 ),
             ];
@@ -344,6 +345,7 @@ impl User {
                     federation_uid,
                     &change,
                     &now,
+                    &RauthyConfig::get().issuer,
                 ],
             )
             .await?;
@@ -460,7 +462,8 @@ impl User {
                         &a.issuer,
                         &a.federation_uid,
                         &a.link_change,
-                        a.observed_at
+                        a.observed_at,
+                        &a.observer
                     ),
                 ));
             }
@@ -483,6 +486,7 @@ impl User {
                         &a.federation_uid,
                         &a.link_change,
                         &a.observed_at,
+                        &a.observer,
                     ],
                 )
                 .await?;
@@ -522,11 +526,28 @@ impl User {
         Ok(())
     }
 
+    // Cached profile fields never override the durable identity relation.
+    async fn refresh_provider_projection(&mut self) -> Result<(), ErrorResponse> {
+        // Keep the persisted primary pair, including when its ordering differs from
+        // a migrated relation. Never let an old cached pair resurrect an unlink.
+        let sql = "SELECT * FROM users WHERE id=$1";
+        let stored: Self = if is_hiqlite() {
+            DB::hql().query_as_one(sql, params!(&self.id)).await?
+        } else {
+            DB::pg_query_one(sql, &[&self.id]).await?
+        };
+        self.auth_provider_id = stored.auth_provider_id;
+        self.federation_uid = stored.federation_uid;
+        Ok(())
+    }
+
     pub async fn find(id: String) -> Result<Self, ErrorResponse> {
         let idx = format!("{IDX_USERS}_{id}");
         let client = DB::hql();
 
-        if let Some(slf) = client.get(Cache::User, &idx).await? {
+        let cached: Option<Self> = client.get(Cache::User, &idx).await?;
+        if let Some(mut slf) = cached {
+            slf.refresh_provider_projection().await?;
             return Ok(slf);
         }
 
@@ -541,13 +562,25 @@ impl User {
         Ok(slf)
     }
 
+    pub async fn find_by_email_optional(email: &str) -> Result<Option<Self>, ErrorResponse> {
+        let email = email.to_lowercase();
+        let sql = "SELECT * FROM users WHERE email = $1";
+        if is_hiqlite() {
+            Ok(DB::hql().query_as_optional(sql, params!(email)).await?)
+        } else {
+            DB::pg_query_opt(sql, &[&email]).await
+        }
+    }
+
     pub async fn find_by_email(email: String) -> Result<User, ErrorResponse> {
         let email = email.to_lowercase();
 
         let idx = format!("{IDX_USERS}_{email}");
         let client = DB::hql();
 
-        if let Some(slf) = client.get(Cache::User, &idx).await? {
+        let cached: Option<Self> = client.get(Cache::User, &idx).await?;
+        if let Some(mut slf) = cached {
+            slf.refresh_provider_projection().await?;
             return Ok(slf);
         }
 
@@ -565,22 +598,20 @@ impl User {
     pub async fn find_by_federation(
         auth_provider_id: &str,
         federation_uid: &str,
-    ) -> Result<Self, ErrorResponse> {
-        let sql = r#"
-SELECT u.* FROM users u
-JOIN identity_links l ON l.user_id = u.id
-WHERE l.provider_id = $1 AND l.federation_uid = $2"#;
+    ) -> Result<Option<Self>, ErrorResponse> {
+        let sql = "SELECT u.* FROM users u JOIN identity_links l ON l.user_id=u.id WHERE l.provider_id=$1 AND l.federation_uid=$2";
         let slf = if is_hiqlite() {
             DB::hql()
-                .query_as_one(sql, params!(auth_provider_id, federation_uid))
+                .query_as_optional(sql, params!(auth_provider_id, federation_uid))
                 .await?
         } else {
-            DB::pg_query_one(sql, &[&auth_provider_id, &federation_uid]).await?
+            DB::pg_query_opt(sql, &[&auth_provider_id, &federation_uid]).await?
         };
 
         Ok(slf)
     }
 
+    /// A fresh authoritative email lookup; storage errors never mean user absence.
     pub async fn find_all() -> Result<Vec<Self>, ErrorResponse> {
         let sql = "SELECT * FROM users ORDER BY created_at ASC";
         let res = if is_hiqlite() {
@@ -971,31 +1002,6 @@ LIMIT $2"#;
         }
 
         Ok(res)
-    }
-
-    /// Removes the user's only provider link.
-    ///
-    /// With more than one link, the link to remove must be named, and this is refused.
-    pub async fn provider_unlink(user_id: String) -> Result<Self, ErrorResponse> {
-        let links = IdentityLink::find_by_user(&user_id).await?;
-        match links.as_slice() {
-            [] => {
-                return Err(ErrorResponse::new(
-                    ErrorResponseType::NotFound,
-                    "identity_link_unknown: you have no provider link",
-                ));
-            }
-            [link] => IdentityLink::unlink(&user_id, &link.provider_id).await?,
-            _ => {
-                return Err(ErrorResponse::new(
-                    ErrorResponseType::BadRequest,
-                    "identity_link_ambiguous: you have more than one provider link, name the \
-                    provider to unlink",
-                ));
-            }
-        }
-
-        Self::find(user_id).await
     }
 
     /// Appends multiple necessary transaction queries to update a user to the given `Vec<_>`.

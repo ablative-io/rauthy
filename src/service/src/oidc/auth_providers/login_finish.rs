@@ -24,12 +24,13 @@ pub async fn login_finish<'a>(
     mut session: Session,
 ) -> Result<(AuthStep, Cookie<'a>, NewFederatedUserCreated), ErrorResponse> {
     // the callback id for the cache should be inside the encrypted cookie
-    let callback_id = ApiCookie::from_req(req, COOKIE_UPSTREAM_CALLBACK).ok_or_else(|| {
-        ErrorResponse::new(
-            ErrorResponseType::Forbidden,
-            "Missing encrypted callback cookie",
-        )
-    })?;
+    let callback_id =
+        ApiCookie::from_req_checked(req, COOKIE_UPSTREAM_CALLBACK)?.ok_or_else(|| {
+            ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                "Missing encrypted callback cookie",
+            )
+        })?;
 
     // validate state
     if payload.iss_atproto.is_none() && callback_id != payload.state {
@@ -76,6 +77,20 @@ pub async fn login_finish<'a>(
     // account it names.
     if let Some(link) = &slf.link {
         check_link_session(link, &session)?;
+        let intent =
+            rauthy_data::entity::identity_link_intents::LinkIntent::find(&link.intent_id).await?;
+        intent.validate(
+            &link.user_id,
+            &session.id,
+            &provider.id,
+            chrono::Utc::now().timestamp(),
+        )?;
+        if slf.callback_id != intent.callback_id || link.nonce != intent.nonce {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                "identity_link_intent_mismatch: callback and nonce must match the durable intent",
+            ));
+        }
     }
 
     // deserialize payload and validate the information
@@ -116,6 +131,7 @@ pub async fn login_finish<'a>(
         client,
         &mut session,
         AuthorizeData {
+            authenticated_now: true,
             redirect_uri: slf.req_redirect_uri,
             scopes: slf.req_scopes,
             state: slf.req_state,
