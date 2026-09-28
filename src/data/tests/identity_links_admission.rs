@@ -77,9 +77,27 @@ impl Fixture {
         self.client
             .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema))
             .await?;
+        self.close().await
+    }
+
+    async fn close(self) -> TestResult {
         drop(self.client);
         self.connection.await??;
         Ok(())
+    }
+
+    async fn reconnect(&self) -> Result<Self, Box<dyn Error>> {
+        let url = std::env::var("IDENTITY_TEST_DATABASE_URL")?;
+        let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+        let connection = tokio::spawn(connection);
+        client
+            .batch_execute(&format!("SET search_path TO {}", self.schema))
+            .await?;
+        Ok(Self {
+            client,
+            schema: self.schema.clone(),
+            connection,
+        })
     }
 
     async fn admit(
@@ -411,4 +429,41 @@ async fn forward_migration_refuses_half_pairs_without_changing_applied_history()
         db.finish().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_callbacks_consume_the_intent_once() -> TestResult {
+    let mut first = Fixture::new("google", "github").await?;
+    let mut second = first.reconnect().await?;
+    let (left, right) = tokio::join!(
+        first.admit("github", "callback", "nonce", 150, "left", 5),
+        second.admit("github", "callback", "nonce", 150, "right", 5),
+    );
+    assert_ne!(left.is_ok(), right.is_ok());
+    assert_eq!(first.count("identity_links").await?, 2);
+    assert_eq!(first.count("identity_link_audit").await?, 1);
+    second.close().await?;
+    first.finish().await
+}
+
+#[tokio::test]
+async fn concurrent_removals_cannot_remove_the_final_method() -> TestResult {
+    let mut first = Fixture::new("google", "github").await?;
+    first
+        .admit("github", "callback", "nonce", 150, "linked", 5)
+        .await?;
+    let mut second = first.reconnect().await?;
+    let (left, right) = tokio::join!(
+        first.unlink("google", "first-sub", "remove-google"),
+        second.unlink("github", "second-sub", "remove-github"),
+    );
+    assert_ne!(left.is_ok(), right.is_ok());
+    assert_eq!(first.count("identity_links").await?, 1);
+    assert_eq!(first.count("identity_link_audit").await?, 2);
+    let primary_matches: i64 = first.client.query_one(
+        "SELECT count(*) FROM users u JOIN identity_links l ON l.user_id=u.id AND l.provider_id=u.auth_provider_id AND l.federation_uid=u.federation_uid", &[],
+    ).await?.get(0);
+    assert_eq!(primary_matches, 1);
+    second.close().await?;
+    first.finish().await
 }

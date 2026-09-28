@@ -28,7 +28,7 @@ impl LinkAudit {
     /// Propagates an authoritative storage error rather than reporting absence.
     pub async fn find(operation: &str) -> Result<Option<Self>, ErrorResponse> {
         let sql = "SELECT id AS operation_id,user_id,provider_id,issuer,federation_uid AS subject,link_change AS change,actor_session,observer,observed_at,lys_person,receipt,acknowledged_at FROM identity_link_audit WHERE id=$1";
-        { DB::pg_query_opt(sql, &[&operation]).await }
+        DB::pg_query_opt(sql, &[&operation]).await
     }
 
     /// Read one person's operations for their own account display.
@@ -37,7 +37,7 @@ impl LinkAudit {
     /// Propagates an authoritative storage error.
     pub async fn for_user(user: &str) -> Result<Vec<Self>, ErrorResponse> {
         let sql = "SELECT id AS operation_id,user_id,provider_id,issuer,federation_uid AS subject,link_change AS change,actor_session,observer,observed_at,lys_person,receipt,acknowledged_at FROM identity_link_audit WHERE user_id=$1 ORDER BY observed_at,id";
-        { DB::pg_query(sql, &[&user], 2).await }
+        DB::pg_query(sql, &[&user], 2).await
     }
 
     /// A repeated operation can only recover its exact original request.

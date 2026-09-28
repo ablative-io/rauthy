@@ -517,7 +517,6 @@ pub async fn delete_provider_img(
     post,
     path = "/providers/{id}/link",
     tag = "providers",
-    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     request_body = rauthy_api_types::auth_providers::ProviderLinkRequest,
     responses(
         (status = 202, description = "Accepted, the Location header leads to the provider"),
@@ -581,6 +580,7 @@ pub async fn post_provider_link(
     delete,
     path = "/providers/{id}/link",
     tag = "providers",
+    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     responses(
         (status = 200, description = "OK", body = UserResponse),
         (status = 400, description = "BadRequest", body = ErrorResponse),
