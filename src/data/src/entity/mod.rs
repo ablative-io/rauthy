@@ -77,3 +77,6 @@ pub mod identity_link_observation;
 pub mod identity_link_sql;
 pub mod identity_link_unlink;
 pub mod identity_link_validation;
+
+pub mod identity_link_receipt;
+mod identity_link_receipt_wire;

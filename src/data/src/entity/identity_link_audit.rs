@@ -1,4 +1,5 @@
 //! Immutable link observations retain original provenance and receiver acknowledgement.
+use super::identity_link_receipt::VerifiedLinkReceipt;
 use crate::database::DB;
 use chrono::Utc;
 use hiqlite::macros::params;
@@ -9,9 +10,6 @@ use rauthy_common::is_hiqlite;
 use rauthy_derive::FromPgRow;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
 use serde::{Deserialize, Serialize};
-
-/// The longest receipt the receiver may acknowledge an observation with.
-pub const RECEIPT_MAX_BYTES: usize = 16384;
 
 /// Inserts one observation. `$1` id, `$2` user, `$3` provider, `$4` issuer, `$5` federation
 /// uid, `$6` change, `$7` observed at, `$8` original observer.
@@ -70,6 +68,9 @@ pub struct IdentityLinkAudit {
     pub lys_person: Option<String>,
     pub receipt: Option<String>,
     pub acknowledged_at: Option<i64>,
+    /// Legacy text receipts are not proof; only the verifier sets this marker.
+    #[serde(default)]
+    pub receipt_verified: bool,
 }
 
 impl IdentityLinkAudit {
@@ -77,7 +78,7 @@ impl IdentityLinkAudit {
     pub async fn find_pending() -> Result<Vec<Self>, ErrorResponse> {
         let sql = r#"
 SELECT * FROM identity_link_audit
-WHERE acknowledged_at IS NULL
+WHERE receipt_verified = FALSE
 ORDER BY observed_at ASC, id ASC"#;
         let res = if is_hiqlite() {
             DB::hql().query_as(sql, params!()).await?
@@ -111,50 +112,76 @@ ORDER BY observed_at ASC, id ASC"#;
         Ok(res)
     }
 
-    /// Records the receiver's receipt for the observation `id`.
-    ///
-    /// The same receipt again answers the stored observation and changes nothing. A different
-    /// receipt for an acknowledged observation is refused, so an observation is never
-    /// acknowledged twice.
-    pub async fn acknowledge(id: &str, receipt: &str) -> Result<Self, ErrorResponse> {
-        validate_receipt(receipt)?;
-
-        let now = Utc::now().timestamp();
-        let sql = r#"
-UPDATE identity_link_audit
-SET receipt = $1, acknowledged_at = $2
-WHERE id = $3 AND acknowledged_at IS NULL"#;
-        if is_hiqlite() {
-            DB::hql().execute(sql, params!(receipt, now, id)).await?;
-        } else {
-            DB::pg_execute(sql, &[&receipt, &now, &id]).await?;
-        }
-
-        let Some(slf) = Self::find(id).await? else {
-            return Err(ErrorResponse::new(
+    /// Bind an operation to the first authoritative person lookup before network delivery.
+    /// A retry refuses a different mapping instead of moving a previously admitted event.
+    pub async fn bind_person(id: &str, user: &str, person: &str) -> Result<Self, ErrorResponse> {
+        let sql = "UPDATE identity_link_audit SET lys_person=$1 WHERE id=$2 AND user_id=$3 AND lys_person IS NULL";
+        DB::pg_execute(sql, &[&person, &id, &user]).await?;
+        let row = Self::find(id).await?.ok_or_else(|| {
+            ErrorResponse::new(
                 ErrorResponseType::NotFound,
-                "identity_link_audit_unknown: no link observation has this id",
+                format!("identity_link_audit_unknown: operation '{id}'"),
+            )
+        })?;
+        if row.user_id != user || row.lys_person.as_deref() != Some(person) {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                format!(
+                    "identity_link_audit_person_conflict: operation '{id}' already names another account or person"
+                ),
             ));
-        };
-        slf.check_receipt(receipt)?;
-        Ok(slf)
+        }
+        Ok(row)
     }
 
-    /// Refuses `receipt` unless it is the one this observation was acknowledged with.
-    pub fn check_receipt(&self, receipt: &str) -> Result<(), ErrorResponse> {
-        if self.receipt.as_deref() == Some(receipt) {
-            Ok(())
-        } else {
-            Err(ErrorResponse::new(
+    /// Only an observation verified against the provisioned Lys service can be acknowledged.
+    /// A retry may carry a newer inclusion checkpoint for the same signed event.
+    pub async fn acknowledge(verified: &VerifiedLinkReceipt) -> Result<Self, ErrorResponse> {
+        let id = verified.operation();
+        let user = verified.user();
+        let person = verified.person();
+        let receipt = verified.evidence();
+        let now = Utc::now().timestamp();
+        let sql = "UPDATE identity_link_audit SET receipt=$1,acknowledged_at=$2,receipt_verified=TRUE WHERE id=$3 AND user_id=$4 AND lys_person=$5 AND receipt_verified=FALSE";
+        DB::pg_execute(sql, &[&receipt, &now, &id, &user, &person]).await?;
+        let row = Self::find(id).await?.ok_or_else(|| {
+            ErrorResponse::new(
+                ErrorResponseType::NotFound,
+                format!("identity_link_audit_unknown: operation '{id}'"),
+            )
+        })?;
+        if row.user_id != user || row.lys_person.as_deref() != Some(person) {
+            return Err(ErrorResponse::new(
                 ErrorResponseType::BadRequest,
-                "identity_link_audit_receipt_conflict: this observation was already \
-                acknowledged with a different receipt",
-            ))
+                format!(
+                    "identity_link_audit_person_conflict: operation '{id}' changed account or person"
+                ),
+            ));
         }
+        let stored = row.receipt.as_deref().ok_or_else(|| ErrorResponse::new(
+            ErrorResponseType::Internal,
+            format!("identity_link_audit_ack_missing: operation '{id}' has no stored acknowledgement"),
+        ))?;
+        let stored: super::identity_link_receipt::ReceiverEvidence = serde_json::from_str(stored)
+            .map_err(|error| {
+            ErrorResponse::new(
+                ErrorResponseType::Internal,
+                format!("identity_link_audit_receipt_unverified: operation '{id}': {error}"),
+            )
+        })?;
+        if stored.message != verified.message() {
+            return Err(ErrorResponse::new(
+                ErrorResponseType::BadRequest,
+                format!(
+                    "identity_link_audit_receipt_conflict: operation '{id}' was acknowledged by another signed event"
+                ),
+            ));
+        }
+        Ok(row)
     }
 
     pub fn state(&self) -> ProviderLinkAuditState {
-        if self.acknowledged_at.is_some() && self.receipt.is_some() {
+        if self.receipt_verified && self.acknowledged_at.is_some() && self.receipt.is_some() {
             ProviderLinkAuditState::Acknowledged
         } else {
             ProviderLinkAuditState::Pending
@@ -183,24 +210,6 @@ WHERE id = $3 AND acknowledged_at IS NULL"#;
     }
 }
 
-/// Refuses an empty receipt, one longer than [`RECEIPT_MAX_BYTES`], or one holding anything
-/// other than printable ASCII.
-pub fn validate_receipt(receipt: &str) -> Result<(), ErrorResponse> {
-    if receipt.is_empty()
-        || receipt.len() > RECEIPT_MAX_BYTES
-        || !receipt.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return Err(ErrorResponse::new(
-            ErrorResponseType::BadRequest,
-            format!(
-                "identity_link_audit_receipt_invalid: a receipt is 1 to {RECEIPT_MAX_BYTES} \
-                bytes of printable ASCII without spaces"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +228,7 @@ mod tests {
             lys_person: None,
             receipt: receipt.map(String::from),
             acknowledged_at: receipt.map(|_| 2),
+            receipt_verified: receipt.is_some(),
         }
     }
 
@@ -239,22 +249,9 @@ mod tests {
 
         let acknowledged = observation(Some("receipt-1"));
         assert_eq!(acknowledged.state(), ProviderLinkAuditState::Acknowledged);
-        assert!(acknowledged.check_receipt("receipt-1").is_ok());
-        let err = acknowledged.check_receipt("receipt-2").unwrap_err();
-        assert!(
-            err.message
-                .starts_with("identity_link_audit_receipt_conflict")
-        );
-    }
-
-    #[test]
-    fn receipts_are_bounded_printable_ascii() {
-        assert!(validate_receipt("r3ceipt:+/=").is_ok());
-        assert!(validate_receipt("").is_err());
-        assert!(validate_receipt("has space").is_err());
-        assert!(validate_receipt("line\nbreak").is_err());
-        assert!(validate_receipt(&"a".repeat(RECEIPT_MAX_BYTES)).is_ok());
-        assert!(validate_receipt(&"a".repeat(RECEIPT_MAX_BYTES + 1)).is_err());
+        let mut legacy = observation(Some("receipt-1"));
+        legacy.receipt_verified = false;
+        assert_eq!(legacy.state(), ProviderLinkAuditState::Pending);
     }
 
     #[test]

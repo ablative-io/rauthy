@@ -61,8 +61,17 @@ impl IdentityTransfer {
             .map_err(|error| ErrorResponse::new(ErrorResponseType::BadRequest, format!("identity link transfer requires an upgraded source with identity_link_format: {}", error.message)))?;
         identity_link_format::validate(&format)?;
         Ok(Self {
-            audits: DB::pg_query_map_with(connection, "SELECT * FROM identity_link_audit", &[], 0)
-                .await?,
+            audits: DB::pg_query_map_with(
+                connection,
+                if format.first().is_some_and(|row| row.version == 1) {
+                    "SELECT *, FALSE AS receipt_verified FROM identity_link_audit"
+                } else {
+                    "SELECT * FROM identity_link_audit"
+                },
+                &[],
+                0,
+            )
+            .await?,
             links: DB::pg_query_map_with(connection, "SELECT * FROM identity_links", &[], 0)
                 .await?,
             intents: DB::pg_query_map_with(
@@ -77,7 +86,7 @@ impl IdentityTransfer {
     }
 
     pub(super) async fn write(self) -> Result<(), ErrorResponse> {
-        let audits_sql = "INSERT INTO identity_link_audit (id,user_id,provider_id,issuer,federation_uid,link_change,actor_session,observer,observed_at,lys_person,receipt,acknowledged_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)";
+        let audits_sql = "INSERT INTO identity_link_audit (id,user_id,provider_id,issuer,federation_uid,link_change,actor_session,observer,observed_at,lys_person,receipt,acknowledged_at,receipt_verified) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)";
         let links_sql = "INSERT INTO identity_links (provider_id,federation_uid,user_id,created) VALUES ($1,$2,$3,$4)";
         let intents_sql = "INSERT INTO identity_link_intents (id,user_id,session_id,provider_id,callback_id,nonce,created_at,expires_at,prior_auth_proof,reauthenticated_at,consumed_operation_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)";
         let proofs_sql =
@@ -107,7 +116,8 @@ impl IdentityTransfer {
                         row.observed_at,
                         row.lys_person,
                         row.receipt,
-                        row.acknowledged_at
+                        row.acknowledged_at,
+                        row.receipt_verified
                     ),
                 ));
             }
@@ -176,6 +186,7 @@ impl IdentityTransfer {
                         &row.lys_person,
                         &row.receipt,
                         &row.acknowledged_at,
+                        &row.receipt_verified,
                     ],
                 )
                 .await?;

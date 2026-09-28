@@ -158,9 +158,7 @@ export interface ProviderLinkAuditResponse {
     acknowledged_at?: number;
 }
 
-export interface ProviderLinkAuditAckRequest {
-    receipt: string;
-}
+export type ProviderLinkAuditAckRequest = Record<string, never>;
 
 export interface ProviderLinkIntentResponse {
     intent_id: string;

@@ -179,6 +179,7 @@ ORDER BY created ASC, provider_id ASC"#;
                 lys_person: None,
                 receipt: None,
                 acknowledged_at: None,
+                receipt_verified: false,
             })
             .collect()
     }
@@ -518,6 +519,7 @@ VALUES ('userLocal', 'local@test', 'Local', '', 1, 1, 200, 'en');
                 lys_person: None,
                 receipt: receipt.map(String::from),
                 acknowledged_at: receipt.map(|_| at),
+                receipt_verified: receipt.is_some(),
             };
 
         assert_eq!(

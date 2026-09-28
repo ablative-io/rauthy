@@ -246,15 +246,12 @@ pub struct ProviderLinkAuditResponse {
     pub acknowledged_at: Option<i64>,
 }
 
+/// Ask the configured receiver to deliver and verify the retained original observation.
+/// Caller-written receipt strings are refused; the request carries no trust material.
 #[derive(Deserialize, Validate, ToSchema)]
 #[cfg_attr(debug_assertions, derive(Serialize))]
-pub struct ProviderLinkAuditAckRequest {
-    /// The receiver's receipt for the observation.
-    ///
-    /// Validation: 1 to 16384 bytes of printable ASCII
-    #[validate(length(min = 1, max = 16384))]
-    pub receipt: String,
-}
+#[serde(deny_unknown_fields)]
+pub struct ProviderLinkAuditAckRequest {}
 
 #[derive(Serialize, ToSchema)]
 pub struct ProviderLookupResponse {

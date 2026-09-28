@@ -685,10 +685,10 @@ pub async fn get_provider_link_audit(
     Ok(HttpResponse::Ok().json(res))
 }
 
-/// POST the receiver's receipt for one provider link audit observation
+/// POST an empty request to deliver one retained observation to the provisioned receiver.
 ///
-/// Acknowledging with the same receipt again answers the stored observation and changes
-/// nothing. A different receipt for an acknowledged observation is refused.
+/// The server obtains and verifies signed evidence itself. Caller-provided receipts are
+/// refused. A retry retains the source operation and can recover an uncertain delivery.
 ///
 /// **Permissions**
 /// - `rauthy_admin`
@@ -715,7 +715,19 @@ pub async fn post_provider_link_audit_ack(
         .validate_api_key_or_admin_session(AccessGroup::AuthProviders, AccessRights::Update)?;
     payload.validate()?;
 
-    let audit = IdentityLinkAudit::acknowledge(&id.into_inner(), &payload.receipt).await?;
+    let id = id.into_inner();
+    let original = IdentityLinkAudit::find(&id).await?.ok_or_else(|| {
+        ErrorResponse::new(
+            ErrorResponseType::NotFound,
+            format!("identity_link_audit_unknown: operation '{id}'"),
+        )
+    })?;
+    if original.receipt_verified {
+        return Ok(HttpResponse::Ok().json(original.into_response()?));
+    }
+    let receiver = rauthy_service::identity_link_delivery_config::configured_receiver().await?;
+    let verified = receiver.deliver(&original).await?;
+    let audit = IdentityLinkAudit::acknowledge(&verified).await?;
     Ok(HttpResponse::Ok().json(audit.into_response()?))
 }
 
