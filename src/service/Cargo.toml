@@ -17,6 +17,10 @@ atrium-api = { workspace = true }
 atrium-common = { workspace = true }
 atrium-oauth = { workspace = true }
 chrono = { workspace = true }
+hex = { workspace = true }
+hmac-sha256 = { workspace = true }
+lys-core = { workspace = true }
+lys-identity = { workspace = true }
 chrono-tz = { workspace = true }
 cryptr = { workspace = true }
 openssl = { workspace = true }
@@ -29,3 +33,6 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

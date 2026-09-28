@@ -897,45 +897,38 @@ async fn id001_link_audit_outbox() -> TestResult {
         assert_eq!(link["audit"], "pending", "no link reads as audited yet");
     }
 
-    // acknowledged once, answered again for the same receipt, refused for another
+    // Arbitrary administrator text is not a receiver acknowledgement.
     let first_id = first["source_operation_id"].as_str().ok_or("id")?;
-    let acked = expect_status(ack(first_id, "receipt-one").await?, 200)
-        .await?
-        .json::<Value>()
+    expect_status(ack(first_id, "receipt-one").await?, 400).await?;
+    let missing_config = Client::new()
+        .post(format!(
+            "{}/providers/links/audit/{first_id}/ack",
+            get_backend_url()
+        ))
+        .headers(get_auth_headers().await?)
+        .json(&json!({}))
+        .send()
         .await?;
-    assert_eq!(acked["state"], "acknowledged");
-    assert_eq!(acked["receipt"], "receipt-one");
-    let again = expect_status(ack(first_id, "receipt-one").await?, 200)
-        .await?
-        .json::<Value>()
-        .await?;
-    assert_eq!(again["acknowledged_at"], acked["acknowledged_at"]);
-    expect_refusal(
-        ack(first_id, "receipt-two").await?,
-        400,
-        "identity_link_audit_receipt_conflict",
-    )
-    .await?;
-    expect_refusal(
-        ack("NoSuchObservation", "receipt-one").await?,
-        404,
-        "identity_link_audit_unknown",
-    )
-    .await?;
-
-    // the other observation is still visible as pending
+    assert!(missing_config.status().is_server_error());
+    let body = missing_config.text().await?;
+    assert!(
+        body.contains("identity_link_audit_not_provisioned"),
+        "{body}"
+    );
     let pending = pending_audit(&user_id).await?;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0]["provider_id"], github.as_str());
-    let links = browser.links().await?;
-    assert_eq!(links[0]["audit"], "acknowledged");
-    assert_eq!(links[1]["audit"], "pending");
+    assert_eq!(pending.len(), 2);
+    for link in browser.links().await? {
+        assert_eq!(link["audit"], "pending");
+    }
 
     // an unlink is observed too
     expect_status(browser.unlink(&google).await?, 200).await?;
     let pending = pending_audit(&user_id).await?;
-    assert_eq!(pending.len(), 2);
-    let unlinked = by_provider(&pending, google.as_str())?;
+    assert_eq!(pending.len(), 3);
+    let unlinked = pending
+        .iter()
+        .find(|row| row["provider_id"] == google.as_str() && row["change"] == "unlinked")
+        .ok_or("missing unlink observation")?;
     assert_eq!(unlinked["change"], "unlinked");
     assert_eq!(unlinked["subject"], google_subject.as_str());
 

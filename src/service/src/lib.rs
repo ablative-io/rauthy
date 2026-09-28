@@ -11,3 +11,6 @@ pub mod password_reset;
 pub mod suspicious_request_block;
 pub mod token_set;
 pub mod user_values_validator;
+
+pub mod identity_link_delivery;
+pub mod identity_link_delivery_config;

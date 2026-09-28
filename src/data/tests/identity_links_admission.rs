@@ -467,3 +467,26 @@ async fn concurrent_removals_cannot_remove_the_final_method() -> TestResult {
     second.close().await?;
     first.finish().await
 }
+
+/// A printable legacy acknowledgement is retained but cannot masquerade as verified evidence.
+#[tokio::test]
+async fn legacy_receipts_require_verification_after_forward_migration() -> TestResult {
+    let db = Fixture::new("google", "github").await?;
+    db.client.execute("INSERT INTO identity_link_audit(id,user_id,provider_id,issuer,federation_uid,link_change,observed_at,receipt,acknowledged_at) VALUES ('legacy','person-a','google','google-issuer','first-sub','linked',100,'plain-text-receipt',101)", &[]).await?;
+    db.client
+        .batch_execute(include_str!(
+            "../../../migrations/postgres/V33__verified_link_receipts.sql"
+        ))
+        .await?;
+    let row = db.client.query_one("SELECT receipt,acknowledged_at,receipt_verified FROM identity_link_audit WHERE id='legacy'", &[]).await?;
+    assert_eq!(row.get::<_, String>(0), "plain-text-receipt");
+    assert_eq!(row.get::<_, i64>(1), 101);
+    assert!(!row.get::<_, bool>(2));
+    let version = db
+        .client
+        .query_one("SELECT version FROM identity_link_format WHERE id=1", &[])
+        .await?;
+    assert_eq!(version.get::<_, i64>(0), 2);
+    db.finish().await?;
+    Ok(())
+}

@@ -7,7 +7,7 @@ use rauthy_error::{ErrorResponse, ErrorResponseType};
 use serde::Deserialize;
 
 /// The identity-link storage contract, independent of the upstream release number.
-pub const SUPPORTED: i64 = 1;
+pub const SUPPORTED: i64 = 2;
 
 #[derive(Deserialize, FromPgRow)]
 pub struct FormatVersion {
@@ -106,7 +106,7 @@ pub async fn check_legacy_pairs() -> Result<(), ErrorResponse> {
 /// Refuses a missing marker or unsupported version by name.
 pub fn validate(rows: &[FormatVersion]) -> Result<(), ErrorResponse> {
     match rows {
-        [version] if version.version == SUPPORTED => Ok(()),
+        [version] if (1..=SUPPORTED).contains(&version.version) => Ok(()),
         [version] => Err(ErrorResponse::new(
             ErrorResponseType::BadRequest,
             format!(
@@ -126,13 +126,14 @@ mod tests {
     use super::{FormatVersion, SUPPORTED, validate};
     #[test]
     fn format_refusals_name_stored_and_supported_versions() {
+        assert!(validate(&[FormatVersion { version: 1 }]).is_ok());
         assert!(validate(&[FormatVersion { version: SUPPORTED }]).is_ok());
         for version in [0, SUPPORTED + 1] {
             let result = validate(&[FormatVersion { version }]);
             assert!(result.is_err());
             if let Err(error) = result {
                 assert!(error.message.contains(&format!("version {version}")));
-                assert!(error.message.contains("supports 1"));
+                assert!(error.message.contains(&format!("supports {SUPPORTED}")));
             }
         }
         assert!(validate(&[]).is_err());

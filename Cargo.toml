@@ -62,6 +62,8 @@ strip = false
 #hiqlite-wal = { git = "https://github.com/sebadob/hiqlite.git", package = "hiqlite-wal" }
 
 [workspace.dependencies]
+lys-core = { git = "https://github.com/ablative-io/lys.git", rev = "e813d65a95b71421ca2404f90315fddd9e6490f2" }
+lys-identity = { git = "https://github.com/ablative-io/lys.git", rev = "e813d65a95b71421ca2404f90315fddd9e6490f2" }
 accept-language = "3"
 actix = "0.13"
 actix-multipart = "0.8"
