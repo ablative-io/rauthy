@@ -233,14 +233,14 @@ pub async fn post_provider_callback_handle(
 
 /// DELETE a link between an existing user account and an upstream provider
 ///
-/// This unlinks the currently logged-in user from its only upstream auth provider link. With
-/// more than one link, use `DELETE /providers/{id}/link` instead. The account must keep
-/// another way to sign in: a password, a passkey or another provider link. Otherwise, this
-/// endpoint will return an error.
+/// The request names the exact provider, subject and retained operation id. The account
+/// must keep another usable way to sign in: a password, a passkey or another provider
+/// link. Retrying an uncertain outcome uses the same request and operation id.
 #[utoipa::path(
     delete,
     path = "/providers/link",
     tag = "providers",
+    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     responses(
         (status = 200, description = "OK", body = UserResponse),
         (status = 400, description = "BadRequest", body = ErrorResponse),
@@ -517,6 +517,7 @@ pub async fn delete_provider_img(
     post,
     path = "/providers/{id}/link",
     tag = "providers",
+    request_body = rauthy_api_types::auth_providers::ProviderUnlinkRequest,
     request_body = rauthy_api_types::auth_providers::ProviderLinkRequest,
     responses(
         (status = 202, description = "Accepted, the Location header leads to the provider"),

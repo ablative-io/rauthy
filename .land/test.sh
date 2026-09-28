@@ -10,7 +10,8 @@ else
     echo 'refused: docker_missing; the fork gate requires an isolated PostgreSQL container' >&2
     exit 1
 fi
-image=sha256:4204b8d967c2ec3adf4a2cfc3bcf1b9aeab1d6a876b7ca782ef3d2a68284036a
+# Built on Dean from .land/Dockerfile.gate, native linux/arm64.
+image=sha256:035431518d4b2da7ad9d8e2b20181c23aa5e0bb272688699cfc8cdd36293ff0a
 "$docker" image inspect "$image" >/dev/null
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 name="rauthy-pg-gate-$(git -C "$root" rev-parse --short=12 HEAD)-$$"

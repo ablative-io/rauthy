@@ -6,7 +6,7 @@ sh scripts/design/gate.sh
 cargo fmt --all -- --check
 (cd src/wasm-modules && wasm-pack build -d ../../frontend/src/wasm/spow --no-pack --out-name spow --features spow)
 (cd src/wasm-modules && wasm-pack build -d ../../frontend/src/wasm/md --no-pack --out-name md --features md)
-(cd frontend && npm ci && npm run check && npm run format-check && npm run build)
+(cd frontend && npm ci && npm exec svelte-kit sync && npm run check && npm run format-check && npm run build)
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace
 HQL_DATA_DIR=$(mktemp -d)

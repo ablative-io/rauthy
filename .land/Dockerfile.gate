@@ -1,0 +1,13 @@
+# Native Linux gate tools; the caller pins the built image by its immutable image id.
+FROM rust:1.95.0-bookworm
+
+COPY assets/node_setup_builder/node_setup_22.sh /tmp/node_setup_22.sh
+RUN bash /tmp/node_setup_22.sh \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends clang libpam0g-dev librust-libudev-sys-dev nodejs python3 \
+    && rm -rf /var/lib/apt/lists/* /tmp/node_setup_22.sh
+RUN rustup component add rustfmt clippy \
+    && rustup target add wasm32-unknown-unknown
+RUN cargo install wasm-pack --version 0.15.0 --locked
+
+WORKDIR /work

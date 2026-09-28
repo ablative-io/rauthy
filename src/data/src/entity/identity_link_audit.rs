@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 pub const RECEIPT_MAX_BYTES: usize = 16384;
 
 /// Inserts one observation. `$1` id, `$2` user, `$3` provider, `$4` issuer, `$5` federation
-/// uid, `$6` change, `$7` observed at.
+/// uid, `$6` change, `$7` observed at, `$8` original observer.
 pub(crate) static SQL_INSERT: &str = r#"
 INSERT INTO identity_link_audit
 (id, user_id, provider_id, issuer, federation_uid, link_change, observed_at, observer)
