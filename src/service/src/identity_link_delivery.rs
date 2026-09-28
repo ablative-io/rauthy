@@ -121,7 +121,7 @@ impl LinkAuditReceiver {
                 "identity_link_audit_mapping_conflict",
                 format!(
                     "login ('{observer}', '{}') was bound to '{saved}' but now resolves to '{}'; \
-                     a Lys directory administrator must reconcile the login mapping before retrying; \
+                     requires an explicit directory mapping reconciliation protocol, not a retry or local reset; \
                      this operation remains bound to its original person",
                     observation.user_id, holder.person
                 ),
