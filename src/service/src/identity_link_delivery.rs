@@ -9,6 +9,7 @@ use rauthy_data::entity::identity_link_receipt::{
 use rauthy_error::{ErrorResponse, ErrorResponseType};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,7 @@ pub struct LinkAuditReceiver {
     source_issuer: String,
     source_subject: String,
     signing_key: Ed25519Identity,
+    response_body_bytes: NonZeroUsize,
 }
 
 #[derive(Deserialize)]
@@ -47,9 +49,9 @@ impl LinkAuditReceiver {
         base: Url,
         service_key: [u8; 32],
         source_agent: AgentId,
-        source_issuer: String,
-        source_subject: String,
+        source_login: (String, String),
         signing_key: Ed25519Identity,
+        response_body_bytes: NonZeroUsize,
     ) -> Result<Self, ErrorResponse> {
         let loopback = base.host_str().is_some_and(|host| {
             host == "localhost"
@@ -80,9 +82,10 @@ impl LinkAuditReceiver {
             base,
             service_key,
             source_agent,
-            source_issuer,
-            source_subject,
+            source_issuer: source_login.0,
+            source_subject: source_login.1,
             signing_key,
+            response_body_bytes,
         })
     }
 
@@ -110,15 +113,18 @@ impl LinkAuditReceiver {
             .await?;
         let person = PersonId::from_str(&holder.person)
             .map_err(|error| refused(operation, "person lookup", error))?;
-        if observation
-            .lys_person
-            .as_ref()
-            .is_some_and(|saved| saved != &holder.person)
+        if let Some(saved) = &observation.lys_person
+            && saved != &holder.person
         {
             return Err(refused(
                 operation,
-                "person lookup",
-                "mapping changed after it was bound",
+                "identity_link_audit_mapping_conflict",
+                format!(
+                    "login ('{observer}', '{}') was bound to '{saved}' but now resolves to '{}'; \
+                     a Lys directory administrator must reconcile the login mapping before retrying; \
+                     this operation remains bound to its original person",
+                    observation.user_id, holder.person
+                ),
             ));
         }
         let observation =
@@ -181,8 +187,9 @@ impl LinkAuditReceiver {
             .send()
             .await
             .map_err(|error| refused(operation, "read receipt", error))?;
-        let evidence: ReceiverEvidence =
-            Self::read_response(operation, "read receipt", response).await?;
+        let evidence: ReceiverEvidence = self
+            .read_response(operation, "read receipt", response)
+            .await?;
         if serde_json::to_value(&evidence.receipt)
             .map_err(|error| refused(operation, "compare receipt", error))?
             != delivered.receipt
@@ -221,24 +228,46 @@ impl LinkAuditReceiver {
     }
 
     async fn read_response<T: serde::de::DeserializeOwned>(
+        &self,
         operation: &str,
         stage: &str,
-        response: reqwest::Response,
+        mut response: reqwest::Response,
     ) -> Result<T, ErrorResponse> {
         let status = response.status();
+        let limit = self.response_body_bytes.get();
+        let oversized = || {
+            refused(
+                operation,
+                stage,
+                format!("HTTP {status}; response exceeds configured response_body_bytes={limit}"),
+            )
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| u128::from(length) > limit as u128)
+        {
+            return Err(oversized());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            refused(
+                operation,
+                stage,
+                format!("HTTP {status}; unreadable response: {error}"),
+            )
+        })? {
+            if chunk.len() > limit.saturating_sub(bytes.len()) {
+                return Err(oversized());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         if !status.is_success() {
-            let body = response.text().await.map_err(|error| {
-                refused(
-                    operation,
-                    stage,
-                    format!("HTTP {status}; unreadable refusal: {error}"),
-                )
-            })?;
+            // JSON quoting prevents proxy-controlled line breaks from forging log entries.
+            let body = serde_json::to_string(&String::from_utf8_lossy(&bytes))
+                .map_err(|error| refused(operation, stage, error))?;
             return Err(refused(operation, stage, format!("HTTP {status}: {body}")));
         }
-        response
-            .json()
-            .await
+        serde_json::from_slice(&bytes)
             .map_err(|error| refused(operation, stage, format!("invalid JSON response: {error}")))
     }
 
@@ -272,7 +301,7 @@ impl LinkAuditReceiver {
             .send()
             .await
             .map_err(|error| refused(operation, path, error))?;
-        Self::read_response(operation, path, response).await
+        self.read_response(operation, path, response).await
     }
 }
 

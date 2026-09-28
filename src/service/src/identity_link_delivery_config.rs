@@ -1,9 +1,13 @@
 //! Read provisioned receiver trust; absent configuration leaves link audits pending by name.
+//! `LYS_LINK_AUDIT_CONFIG` names an absolute JSON file containing `service_url`,
+//! `service_key`, `source_agent`, `source_issuer`, `source_subject`, `signing_key_path`
+//! and a positive `response_body_bytes`. No trust, key or response limit is invented.
 use crate::identity_link_delivery::LinkAuditReceiver;
 use lys_core::Ed25519Identity;
 use lys_identity::AgentId;
 use rauthy_error::{ErrorResponse, ErrorResponseType};
 use serde::Deserialize;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -16,6 +20,7 @@ struct ReceiverConfig {
     source_issuer: String,
     source_subject: String,
     signing_key_path: PathBuf,
+    response_body_bytes: NonZeroUsize,
 }
 
 fn refused(path: &Path, reason: impl std::fmt::Display) -> ErrorResponse {
@@ -70,8 +75,34 @@ pub async fn configured_receiver() -> Result<LinkAuditReceiver, ErrorResponse> {
         url,
         service_key,
         agent,
-        config.source_issuer,
-        config.source_subject,
+        (config.source_issuer, config.source_subject),
         key,
+        config.response_body_bytes,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReceiverConfig;
+    use serde_json::json;
+    use std::error::Error;
+
+    #[test]
+    fn response_limit_is_explicit_and_positive() -> Result<(), Box<dyn Error>> {
+        let mut value = json!({
+            "service_url": "https://identity.test/api/",
+            "service_key": "03".repeat(32),
+            "source_agent": "agent-05050505050505050505050505050505",
+            "source_issuer": "https://issuer.test/",
+            "source_subject": "lys-link-audit",
+            "signing_key_path": "/provisioned/source.key"
+        });
+        assert!(serde_json::from_value::<ReceiverConfig>(value.clone()).is_err());
+        value["response_body_bytes"] = json!(0);
+        assert!(serde_json::from_value::<ReceiverConfig>(value.clone()).is_err());
+        value["response_body_bytes"] = json!(4096);
+        let config: ReceiverConfig = serde_json::from_value(value)?;
+        assert_eq!(config.response_body_bytes.get(), 4096);
+        Ok(())
+    }
 }

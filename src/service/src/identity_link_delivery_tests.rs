@@ -12,9 +12,9 @@ pub(super) fn receiver(url: &str) -> Result<LinkAuditReceiver, Box<dyn Error>> {
         Url::parse(url)?,
         [3; 32],
         AgentId::from_bytes([5; 16]),
-        "https://issuer.test/".into(),
-        "lys-link-audit".into(),
+        ("https://issuer.test/".into(), "lys-link-audit".into()),
         key,
+        NonZeroUsize::new(65_536).ok_or("fixture response limit is zero")?,
     )
     .map_err(|error| error.to_string().into())
 }

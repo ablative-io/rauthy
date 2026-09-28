@@ -52,6 +52,15 @@ pub(super) async fn answer(
     status: &str,
     body: &str,
 ) -> Result<Request, Box<dyn Error>> {
+    answer_framed(listener, status, body, false).await
+}
+
+async fn answer_framed(
+    listener: &TcpListener,
+    status: &str,
+    body: &str,
+    chunked: bool,
+) -> Result<Request, Box<dyn Error>> {
     let (mut stream, _) = listener.accept().await?;
     let mut bytes = Vec::new();
     let mut chunk = [0; 1024];
@@ -78,9 +87,20 @@ pub(super) async fn answer(
         request.body.extend_from_slice(&chunk[..count]);
     }
     assert_eq!(request.body.len(), length);
+    let framing = if chunked {
+        // Separate small chunks measure the aggregate bound, not just one large chunk.
+        let mut framing = String::from("Transfer-Encoding: chunked\r\n\r\n");
+        for chunk in body.as_bytes().chunks(4) {
+            let text = String::from_utf8(chunk.to_vec())?;
+            framing.push_str(&format!("{:x}\r\n{text}\r\n", chunk.len()));
+        }
+        framing.push_str("0\r\n\r\n");
+        framing
+    } else {
+        format!("Content-Length: {}\r\n\r\n{body}", body.len())
+    };
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nLocation: /elsewhere\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nLocation: /elsewhere\r\nConnection: close\r\n{framing}"
     );
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await?;
@@ -206,5 +226,81 @@ async fn person_lookup_uses_original_rauthy_login_not_upstream_provider() -> Tes
         return Err("unbound login was accepted".into());
     };
     assert!(error.message.contains("LoginUnbound"), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_limit_bounds_success_and_refusal_with_or_without_content_length() -> TestResult
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut receiver = super::tests::receiver(&format!("http://{}/api/", listener.local_addr()?))?;
+    receiver.response_body_bytes = NonZeroUsize::new(8).ok_or("fixture limit is zero")?;
+    for chunked in [false, true] {
+        for status in ["200 OK", "403 Forbidden"] {
+            let (sent, seen) = tokio::join!(
+                receiver.post::<Value>("bounded-op", "/link-audit", &json!({})),
+                answer_framed(&listener, status, "oversized", chunked)
+            );
+            seen?;
+            let Err(error) = sent else {
+                return Err("oversized receiver body was accepted".into());
+            };
+            assert!(error.message.contains("bounded-op"), "{error}");
+            assert!(error.message.contains(&status[..3]), "{error}");
+            assert!(error.message.contains("response_body_bytes=8"), "{error}");
+            assert!(!error.message.contains("oversized"), "body leaked: {error}");
+        }
+        let (sent, seen) = tokio::join!(
+            receiver.post::<Value>("bounded-op", "/link-audit", &json!({})),
+            answer_framed(&listener, "200 OK", "\"abcdef\"", chunked)
+        );
+        seen?;
+        assert_eq!(sent.map_err(|error| error.to_string())?, json!("abcdef"));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changed_mapping_refuses_with_login_and_both_people() -> TestResult {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let receiver = super::tests::receiver(&format!("http://{}/api/", listener.local_addr()?))?;
+    let original = PersonId::from_bytes([1; 16]).to_string();
+    let current = PersonId::from_bytes([2; 16]).to_string();
+    let observation = IdentityLinkAudit {
+        id: "bound-op".into(),
+        user_id: "original-user".into(),
+        provider_id: "google".into(),
+        issuer: "https://accounts.google.com".into(),
+        federation_uid: "upstream-user".into(),
+        link_change: "linked".into(),
+        observed_at: 123,
+        observer: Some("https://issuer.test/".into()),
+        actor_session: None,
+        lys_person: Some(original.clone()),
+        receipt: None,
+        acknowledged_at: None,
+        receipt_verified: false,
+    };
+    let response = json!({"person": current}).to_string();
+    let (sent, seen) = tokio::join!(
+        receiver.deliver(&observation),
+        answer(&listener, "200 OK", &response)
+    );
+    seen?.verify(
+        "/link-audit/person",
+        &receiver.signing_key.public_key_bytes(),
+    )?;
+    let Err(error) = sent else {
+        return Err("changed person binding was accepted".into());
+    };
+    for name in [
+        "bound-op",
+        "original-user",
+        "identity_link_audit_mapping_conflict",
+        &original,
+        &current,
+    ] {
+        assert!(error.message.contains(name), "{error}");
+    }
     Ok(())
 }

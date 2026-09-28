@@ -1,4 +1,6 @@
 //! Only signed Lys evidence bound to the exact local observation can acknowledge an audit.
+//! The event is authenticated by the pinned service key. Inclusion is checked against
+//! the receiver-supplied checkpoint; that checkpoint is not independently signed.
 use super::identity_link_audit::IdentityLinkAudit;
 pub use super::identity_link_receipt_wire::ReceiverEvidence;
 use lys_core::merkle::InclusionProof;
