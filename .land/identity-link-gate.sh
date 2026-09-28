@@ -11,8 +11,8 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo build --locked --workspace
 HQL_DATA_DIR=$(mktemp -d)
 export HQL_DATA_DIR
-log=/target/identity-link-postgres-backend.log
-/target/debug/rauthy serve -c config-test.toml --test >"$log" 2>&1 &
+log=target/identity-link-postgres-backend.log
+target/debug/rauthy serve -c config-test.toml --test >"$log" 2>&1 &
 server=$!
 cleanup() {
     result=$?

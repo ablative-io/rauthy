@@ -15,9 +15,12 @@ image=sha256:035431518d4b2da7ad9d8e2b20181c23aa5e0bb272688699cfc8cdd36293ff0a
 "$docker" image inspect "$image" >/dev/null
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 name="rauthy-pg-gate-$(git -C "$root" rev-parse --short=12 HEAD)-$$"
-target="${CARGO_TARGET_DIR:?The gate venue must supply its owned target directory}/rauthy-linux"
-mkdir -p "$target"
-target=$(CDPATH= cd -- "$target" && pwd -P)
+# Use the venue's existing normal build directory. Never create a gate-specific target.
+if [ ! -d "$root/target" ]; then
+    echo "refused: existing_build_directory_missing: $root/target; prepare the venue's regular build location" >&2
+    exit 1
+fi
+target=$(CDPATH= cd -- "$root/target" && pwd -P)
 network_created=false
 postgres_created=false
 builder_created=false
@@ -28,7 +31,7 @@ cleanup() {
         "$docker" rm -f "$name" >/dev/null || result=1
     fi
     if [ "$postgres_created" = true ]; then
-        "$docker" rm -f "$name-pg" >/dev/null || result=1
+        "$docker" rm -fv "$name-pg" >/dev/null || result=1
     fi
     if [ "$network_created" = true ]; then
         "$docker" network rm "$name" >/dev/null || result=1
@@ -56,8 +59,8 @@ until "$docker" exec "$name-pg" pg_isready -U rauthy -d rauthy >/dev/null; do
 done
 "$docker" create --name "$name" --network "$name" \
     --mount "type=bind,src=$root,dst=/work" \
-    --mount "type=bind,src=$target,dst=/target" \
-    -e CARGO_TARGET_DIR=/target -e HIQLITE=false -e PG_HOST="$name-pg" \
+    --mount "type=bind,src=$target,dst=/work/target" \
+    -e HIQLITE=false -e PG_HOST="$name-pg" \
     -e PG_PORT=5432 -e PG_DB_NAME=rauthy -e PG_USER=rauthy -e PG_PASSWORD=123SuperSafe \
     -e IDENTITY_TEST_DATABASE_URL="host=$name-pg port=5432 user=rauthy password=123SuperSafe dbname=rauthy" \
     -w /work "$image" sh .land/identity-link-gate.sh >/dev/null
