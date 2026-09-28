@@ -242,12 +242,12 @@ async fn expect_status(res: Response, status: u16) -> Result<Response, Box<dyn E
 }
 
 /// Answers the error body after checking the status, for a named refusal.
-async fn expect_refusal(res: Response, status: u16, name: &str) -> TestResult {
+async fn expect_refusal(res: Response, status: u16, name: &str) -> Result<String, Box<dyn Error>> {
     let got = res.status().as_u16();
     let text = res.text().await?;
     assert_eq!(got, status, "refusal {name}: {text}");
     assert!(text.contains(name), "refusal names {name}: {text}");
-    Ok(())
+    Ok(text)
 }
 
 /// One browser: its cookies and its session's CSRF token.
@@ -646,7 +646,11 @@ async fn id001_link_refusal_collisions() -> TestResult {
     let res = stranger
         .callback(&started, &code(&unique("sub-"), &email))
         .await?;
-    expect_refusal(res, 403, "identity_link_explicit_required").await?;
+    let refused = expect_refusal(res, 403, "identity_link_explicit_required").await?;
+    assert!(
+        !refused.contains(&email),
+        "the refusal does not disclose the email: {refused}"
+    );
 
     // an identity another user owns
     let mut other = Browser::new().await?;

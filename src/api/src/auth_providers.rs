@@ -186,6 +186,7 @@ pub async fn get_provider_callback_html(req: HttpRequest) -> Result<HttpResponse
         (status = 200, description = "Correct credentials, but needs to continue with Webauthn MFA Login", body = WebauthnLoginResponse),
         (status = 202, description = "Correct credentials and no MFA Login required, adds Location header"),
         (status = 400, description = "BadRequest", body = ErrorResponse),
+        (status = 403, description = "Forbidden, identity_link_explicit_required when the email already has an account", body = ErrorResponse),
         (status = 404, description = "NotFound", body = ErrorResponse),
     ),
 )]

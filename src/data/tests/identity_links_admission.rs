@@ -2,6 +2,7 @@
 use cryptr::utils::secure_random_alnum;
 use rauthy_data::entity::identity_link_sql as sql;
 use std::error::Error;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, NoTls};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -201,10 +202,12 @@ async fn pair_both_orders_replay_and_primary_are_durable() -> TestResult {
                 .get::<_, String>(0),
             first
         );
-        assert!(
-            db.admit(second, "callback", "nonce", 151, "repeat", 5)
-                .await
-                .is_err()
+        assert_eq!(
+            refusal(
+                db.admit(second, "callback", "nonce", 151, "repeat", 5)
+                    .await
+            ),
+            Some(SqlState::NOT_NULL_VIOLATION)
         );
         assert_eq!(db.count("identity_link_audit").await?, 1);
         // A second connection sees the committed relation, not the first connection's state.
@@ -237,10 +240,12 @@ async fn binding_and_expiry_refusals_leave_no_half_state() -> TestResult {
         ("github", "callback", "nonce", 300),
     ] {
         let mut db = Fixture::new("google", "github").await?;
-        assert!(
-            db.admit(provider, callback, nonce, now, "operation", 5)
-                .await
-                .is_err()
+        assert_eq!(
+            refusal(
+                db.admit(provider, callback, nonce, now, "operation", 5)
+                    .await
+            ),
+            Some(SqlState::NOT_NULL_VIOLATION)
         );
         assert_eq!(db.count("identity_link_audit").await?, 0);
         assert_eq!(db.count("identity_links").await?, 1);
@@ -274,10 +279,12 @@ async fn revoked_session_user_and_provider_refuse_admission() -> TestResult {
     ] {
         let mut db = Fixture::new("google", "github").await?;
         db.client.batch_execute(change).await?;
-        assert!(
-            db.admit("github", "callback", "nonce", 150, "operation", 5)
-                .await
-                .is_err()
+        assert_eq!(
+            refusal(
+                db.admit("github", "callback", "nonce", 150, "operation", 5)
+                    .await
+            ),
+            Some(SqlState::NOT_NULL_VIOLATION)
         );
         assert_eq!(db.count("identity_link_audit").await?, 0);
         assert_eq!(db.count("identity_links").await?, 1);
@@ -385,10 +392,12 @@ async fn old_proof_refuses_but_same_second_fresh_proof_admits() -> TestResult {
             &[&"intent", &"person-a", &"session-a", &"github", &101_i64],
         )
         .await?;
-    assert!(
-        db.admit("github", "callback", "nonce", 101, "operation", 5)
-            .await
-            .is_err()
+    assert_eq!(
+        refusal(
+            db.admit("github", "callback", "nonce", 101, "operation", 5)
+                .await
+        ),
+        Some(SqlState::NOT_NULL_VIOLATION)
     );
     db.client
         .execute(
@@ -466,4 +475,9 @@ async fn concurrent_removals_cannot_remove_the_final_method() -> TestResult {
     assert_eq!(primary_matches, 1);
     second.close().await?;
     first.finish().await
+}
+
+/// The SQLSTATE an admission was refused with, if it was refused by the database.
+fn refusal(result: Result<(), tokio_postgres::Error>) -> Option<SqlState> {
+    result.err().and_then(|error| error.code().cloned())
 }
