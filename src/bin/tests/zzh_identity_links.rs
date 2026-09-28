@@ -646,7 +646,7 @@ async fn id001_link_refusal_collisions() -> TestResult {
     let res = stranger
         .callback(&started, &code(&unique("sub-"), &email))
         .await?;
-    expect_refusal(res, 403, "already exists but is not linked").await?;
+    expect_refusal(res, 403, "identity_link_explicit_required").await?;
 
     // an identity another user owns
     let mut other = Browser::new().await?;
