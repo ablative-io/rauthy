@@ -27,6 +27,7 @@ pub mod failed_scim_tasks;
 pub mod fed_cm;
 pub mod forward_auth;
 pub mod groups;
+pub mod identity_links;
 pub mod ip_blacklist;
 pub mod ip_rate_limit;
 pub mod issued_tokens;

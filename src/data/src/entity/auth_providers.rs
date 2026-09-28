@@ -1,5 +1,6 @@
 use crate::api_cookie::ApiCookie;
 use crate::database::{Cache, DB};
+use crate::entity::identity_links::{IdentityLookup, lookup_identity, validate_link_target};
 use crate::entity::logos::{Logo, LogoType};
 use crate::entity::users::User;
 use crate::entity::users_values::UserValues;
@@ -1089,11 +1090,11 @@ impl AuthProviderIdClaims<'_> {
         provider: &AuthProvider,
         link_cookie: &Option<AuthProviderLinkCookie>,
     ) -> Result<(User, ProviderMfaLogin, NewFederatedUserCreated), ErrorResponse> {
-        if self.email.is_none() {
+        let Some(email) = self.email.as_deref() else {
             let err = "No `email` in ID token claims. This is a mandatory claim";
             error!("{err}");
             return Err(ErrorResponse::new(ErrorResponseType::BadRequest, err));
-        }
+        };
 
         let claims_user_id_json = if let Some(sub) = &self.sub {
             sub
@@ -1123,80 +1124,86 @@ impl AuthProviderIdClaims<'_> {
             }
         };
 
-        let (user_opt, new_federated_user) = match User::find_by_federation(
-            &provider.id,
-            &claims_user_id,
+        let lookup = lookup_identity(
+            User::find_by_federation(&provider.id, &claims_user_id),
+            || User::find_by_email_optional(email),
         )
-        .await
-        {
-            Ok(user) => {
+        .await?;
+        let (user_opt, new_federated_user) = match lookup {
+            IdentityLookup::Linked(user) => {
+                if let Some(link) = link_cookie {
+                    validate_link_target(&provider.id, &user.id, &link.provider_id, &link.user_id)
+                        .map_err(|reason| {
+                            ErrorResponse::new(
+                                ErrorResponseType::Forbidden,
+                                format!(
+                                    "provider link refused for provider '{}' and user '{}': {reason:?}",
+                                    provider.id, link.user_id
+                                ),
+                            )
+                        })?;
+                }
                 debug!("found already existing user by federation lookup: {user:?}");
                 (Some(user), NewFederatedUserCreated::No)
             }
-            Err(_) => {
-                debug!("did not find already existing user by federation lookup");
-                if let Ok(mut user) =
-                    User::find_by_email(self.email.as_ref().unwrap().to_string()).await
-                {
-                    if let Some(link) = link_cookie {
-                        if link.provider_id != provider.id {
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "bad provider_id in link cookie",
-                            ));
-                        }
-
-                        if link.user_id != user.id {
-                            // In this case, the link cookie exists from another user session.
-                            // It is possible to build this situation manually with access to
-                            // multiple accounts.
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "bad user_id in link cookie",
-                            ));
-                        }
-
-                        // finally, this is our condition we allow linking for existing accs
-                        if link.user_email != user.email {
-                            return Err(ErrorResponse::new(
-                                ErrorResponseType::BadRequest,
-                                "Invalid E-Mail",
-                            ));
-                        }
-
-                        // If we got here, everything was fine, and we can create the link.
-                        // No need to `.save()` here, will be done later anyway with other updates.
-                        user.auth_provider_id = Some(provider.id.clone());
-                        user.federation_uid = Some(claims_user_id.clone());
-
-                        (Some(user), NewFederatedUserCreated::No)
-                    } else if provider.auto_link
-                        && user.federation_uid.is_none()
-                        && user.auth_provider_id.is_none()
-                    {
-                        user.auth_provider_id = Some(provider.id.clone());
-                        user.federation_uid = Some(claims_user_id.clone());
-
-                        (Some(user), NewFederatedUserCreated::No)
-                    } else {
+            IdentityLookup::Email(mut user) => {
+                if let Some(link) = link_cookie {
+                    if link.provider_id != provider.id {
                         return Err(ErrorResponse::new(
-                            ErrorResponseType::Forbidden,
-                            format!(
-                                "User with email '{}' already exists but is not linked to this provider.",
-                                user.email
-                            ),
+                            ErrorResponseType::BadRequest,
+                            "bad provider_id in link cookie",
                         ));
                     }
-                } else if !provider.auto_onboarding {
-                    return Err(ErrorResponse::new(
-                        ErrorResponseType::NotFound,
-                        "User not found",
-                    ));
+
+                    if link.user_id != user.id {
+                        // In this case, the link cookie exists from another user session.
+                        // It is possible to build this situation manually with access to
+                        // multiple accounts.
+                        return Err(ErrorResponse::new(
+                            ErrorResponseType::BadRequest,
+                            "bad user_id in link cookie",
+                        ));
+                    }
+
+                    // finally, this is our condition we allow linking for existing accs
+                    if link.user_email != user.email {
+                        return Err(ErrorResponse::new(
+                            ErrorResponseType::BadRequest,
+                            "Invalid E-Mail",
+                        ));
+                    }
+
+                    // If we got here, everything was fine, and we can create the link.
+                    // No need to `.save()` here, will be done later anyway with other updates.
+                    user.auth_provider_id = Some(provider.id.clone());
+                    user.federation_uid = Some(claims_user_id.clone());
+
+                    (Some(user), NewFederatedUserCreated::No)
+                } else if provider.auto_link
+                    && user.federation_uid.is_none()
+                    && user.auth_provider_id.is_none()
+                {
+                    user.auth_provider_id = Some(provider.id.clone());
+                    user.federation_uid = Some(claims_user_id.clone());
+
+                    (Some(user), NewFederatedUserCreated::No)
                 } else {
-                    // a new user will be created further down
-                    (None, NewFederatedUserCreated::Yes)
+                    return Err(ErrorResponse::new(
+                        ErrorResponseType::Forbidden,
+                        format!(
+                            "User with email '{}' already exists but is not linked to this provider.",
+                            user.email
+                        ),
+                    ));
                 }
             }
+            IdentityLookup::Absent if !provider.auto_onboarding => {
+                return Err(ErrorResponse::new(
+                    ErrorResponseType::NotFound,
+                    "User not found",
+                ));
+            }
+            IdentityLookup::Absent => (None, NewFederatedUserCreated::Yes),
         };
         debug!("user_opt:\n{:?}", user_opt);
 

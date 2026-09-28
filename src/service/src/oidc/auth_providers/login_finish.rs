@@ -13,7 +13,8 @@ use rauthy_data::entity::auth_providers::{
     ProviderMfaLogin,
 };
 use rauthy_data::entity::clients::Client;
-use rauthy_data::entity::sessions::Session;
+use rauthy_data::entity::identity_links::{validate_link_provider, validate_link_session};
+use rauthy_data::entity::sessions::{Session, SessionState};
 use rauthy_error::{ErrorResponse, ErrorResponseType};
 use tracing::error;
 
@@ -75,7 +76,25 @@ pub async fn login_finish<'a>(
     // extract a possibly existing provider link cookie for
     // linking an existing account to a provider
     let link_cookie = ApiCookie::from_req(req, PROVIDER_LINK_COOKIE)
-        .and_then(|value| AuthProviderLinkCookie::try_from(value.as_str()).ok());
+        .map(|value| AuthProviderLinkCookie::try_from(value.as_str()))
+        .transpose()?;
+    if let Some(link) = &link_cookie {
+        validate_link_session(
+            session.state == SessionState::Auth,
+            session.user_id.as_deref(),
+            &link.user_id,
+        )
+        .and_then(|()| validate_link_provider(&provider.id, &link.provider_id))
+        .map_err(|reason| {
+            ErrorResponse::new(
+                ErrorResponseType::Forbidden,
+                format!(
+                    "provider link refused for provider '{}': {reason:?}",
+                    provider.id
+                ),
+            )
+        })?;
+    }
 
     // deserialize payload and validate the information
     let (user, provider_mfa_login, is_new_user) = if provider.issuer == PROVIDER_ATPROTO {

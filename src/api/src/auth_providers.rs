@@ -526,6 +526,17 @@ pub async fn post_provider_link(
     principal.validate_session_auth()?;
     payload.validate()?;
 
+    rauthy_data::entity::identity_links::validate_link_provider(
+        provider_id.as_str(),
+        &payload.provider_id,
+    )
+    .map_err(|reason| {
+        ErrorResponse::new(
+            ErrorResponseType::BadRequest,
+            format!("provider link refused for route provider '{provider_id}': {reason:?}"),
+        )
+    })?;
+
     let user_id = principal.user_id()?.to_string();
     let user = User::find(user_id).await?;
 

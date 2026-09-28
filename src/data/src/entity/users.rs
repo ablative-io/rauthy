@@ -389,17 +389,28 @@ impl User {
     pub async fn find_by_federation(
         auth_provider_id: &str,
         federation_uid: &str,
-    ) -> Result<Self, ErrorResponse> {
+    ) -> Result<Option<Self>, ErrorResponse> {
         let sql = "SELECT * FROM users WHERE auth_provider_id = $1 AND federation_uid = $2";
         let slf = if is_hiqlite() {
             DB::hql()
-                .query_as_one(sql, params!(auth_provider_id, federation_uid))
+                .query_as_optional(sql, params!(auth_provider_id, federation_uid))
                 .await?
         } else {
-            DB::pg_query_one(sql, &[&auth_provider_id, &federation_uid]).await?
+            DB::pg_query_opt(sql, &[&auth_provider_id, &federation_uid]).await?
         };
 
         Ok(slf)
+    }
+
+    /// A fresh authoritative email lookup; storage errors never mean user absence.
+    pub async fn find_by_email_optional(email: &str) -> Result<Option<Self>, ErrorResponse> {
+        let email = email.to_lowercase();
+        let sql = "SELECT * FROM users WHERE email = $1";
+        if is_hiqlite() {
+            Ok(DB::hql().query_as_optional(sql, params!(email)).await?)
+        } else {
+            DB::pg_query_opt(sql, &[&email]).await
+        }
     }
 
     pub async fn find_all() -> Result<Vec<Self>, ErrorResponse> {
