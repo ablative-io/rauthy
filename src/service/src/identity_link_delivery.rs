@@ -239,7 +239,7 @@ impl LinkAuditReceiver {
         response
             .json()
             .await
-            .map_err(|error| refused(operation, stage, error))
+            .map_err(|error| refused(operation, stage, format!("invalid JSON response: {error}")))
     }
 
     async fn post<T: serde::de::DeserializeOwned>(

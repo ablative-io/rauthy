@@ -131,7 +131,7 @@ async fn remote_refusal_redirect_and_malformed_success_keep_operation_named() ->
             "NotAdmitted",
         ),
         ("302 Found", "{}", "HTTP 302"),
-        ("200 OK", "not JSON", "decode"),
+        ("200 OK", "not JSON", "invalid JSON response"),
     ] {
         let (done, finished) = tokio::sync::oneshot::channel();
         let send = async {
