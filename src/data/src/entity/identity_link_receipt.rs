@@ -175,6 +175,11 @@ pub fn verify_link_receipt(
     .map_err(|error| refused(operation, error))?;
     let mut normalized = evidence.clone();
     normalized.message = hex::encode(&message);
+    normalized.receipt.payload_commitment.make_ascii_lowercase();
+    normalized.receipt.log.root.make_ascii_lowercase();
+    normalized.receipt.log.leaf_hash.make_ascii_lowercase();
+    normalized.checkpoint.root.make_ascii_lowercase();
+    normalized.inclusion_proof.make_ascii_lowercase();
     let serialized = serde_json::to_string(&normalized)
         .map_err(|error| refused(operation, format!("evidence serialization: {error}")))?;
     Ok(VerifiedLinkReceipt {

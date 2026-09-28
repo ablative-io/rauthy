@@ -14,7 +14,7 @@ pub(super) struct Request {
 }
 
 impl Request {
-    fn header(&self, name: &str) -> Result<&str, Box<dyn Error>> {
+    pub(super) fn header(&self, name: &str) -> Result<&str, Box<dyn Error>> {
         self.headers
             .lines()
             .filter_map(|line| line.split_once(':'))
