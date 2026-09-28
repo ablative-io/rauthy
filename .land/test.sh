@@ -10,17 +10,12 @@ else
     echo 'refused: docker_missing; the fork gate requires an isolated PostgreSQL container' >&2
     exit 1
 fi
-# Built on Dean from .land/Dockerfile.gate, native linux/arm64.
-image=sha256:035431518d4b2da7ad9d8e2b20181c23aa5e0bb272688699cfc8cdd36293ff0a
+# The upstream gate image already supplied by the venue; no seat-specific image or cache.
+image=ghcr.io/sebadob/rauthy-builder@sha256:6bea5d732ebfa4613c51a55c1c9c8b5c59dddfde9adbb6eca899d6599fd2b219
 "$docker" image inspect "$image" >/dev/null
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 name="rauthy-pg-gate-$(git -C "$root" rev-parse --short=12 HEAD)-$$"
-# Use the venue's existing normal build directory. Never create a gate-specific target.
-if [ ! -d "$root/target" ]; then
-    echo "refused: existing_build_directory_missing: $root/target; prepare the venue's regular build location" >&2
-    exit 1
-fi
-target=$(CDPATH= cd -- "$root/target" && pwd -P)
+# Cargo uses this checkout's normal target directory; the venue removes the checkout after the run.
 network_created=false
 postgres_created=false
 builder_created=false
@@ -57,9 +52,8 @@ until "$docker" exec "$name-pg" pg_isready -U rauthy -d rauthy >/dev/null; do
     fi
     sleep 1
 done
-"$docker" create --name "$name" --network "$name" \
+"$docker" create --platform linux/amd64 --name "$name" --network "$name" \
     --mount "type=bind,src=$root,dst=/work" \
-    --mount "type=bind,src=$target,dst=/work/target" \
     -e HIQLITE=false -e PG_HOST="$name-pg" \
     -e PG_PORT=5432 -e PG_DB_NAME=rauthy -e PG_USER=rauthy -e PG_PASSWORD=123SuperSafe \
     -e IDENTITY_TEST_DATABASE_URL="host=$name-pg port=5432 user=rauthy password=123SuperSafe dbname=rauthy" \
