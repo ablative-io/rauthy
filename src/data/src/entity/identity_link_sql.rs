@@ -40,12 +40,13 @@ WHERE user_id=$1 AND provider_id=$2 AND federation_uid=$3";
 
 /// A zero-row intent claim becomes a NOT NULL refusal, rolling back the whole txn.
 /// Do not change this to INSERT SELECT: that would silently accept no matching row.
-pub const AUDIT_LINK: &str = "
+pub const AUDIT_LINK: &str = "WITH identity_args (p1,p2,p3,p4,p5,p6,p7,p8) AS (VALUES (CAST($1 AS VARCHAR),CAST($2 AS VARCHAR),CAST($3 AS VARCHAR),CAST($4 AS VARCHAR),CAST($5 AS VARCHAR),CAST($6 AS VARCHAR),CAST($7 AS VARCHAR),CAST($8 AS BIGINT)))
+
 INSERT INTO identity_link_audit
-(id, user_id, provider_id, issuer, federation_uid, link_change, actor_session, observer, observed_at)
-VALUES ($1,
-  (SELECT user_id FROM identity_link_intents WHERE id = $2 AND consumed_operation_id = $1),
-  $3, $4, $5, 'linked', $6, $7, $8)
+(id,user_id,provider_id,issuer,federation_uid,link_change,actor_session,observer,observed_at)
+VALUES ((SELECT p1 FROM identity_args),
+ (SELECT user_id FROM identity_link_intents WHERE id=(SELECT p2 FROM identity_args) AND consumed_operation_id=(SELECT p1 FROM identity_args)),
+ (SELECT p3 FROM identity_args),(SELECT p4 FROM identity_args),(SELECT p5 FROM identity_args),'linked',(SELECT p6 FROM identity_args),(SELECT p7 FROM identity_args),(SELECT p8 FROM identity_args))
 ";
 
 /// Unique (provider, subject) prevents reassignment, including concurrent owners.
