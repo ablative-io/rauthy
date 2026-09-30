@@ -1533,6 +1533,34 @@ impl AuthProviderIdClaims<'_> {
 mod tests {
     use super::*;
 
+    // ID001_LINK_REFUSAL: complete claims must reach validation and propagate its refusal.
+    #[test]
+    fn complete_identity_claims_do_not_select_userinfo_fallback() -> Result<(), ErrorResponse> {
+        for raw in [
+            br#"{"email":"person@example.test","sub":"google-person"}"#.as_slice(),
+            br#"{"email":"person@example.test","id":123}"#.as_slice(),
+            br#"{"email":"person@example.test","uid":"legacy-person"}"#.as_slice(),
+            br#"{"email":"person@example.test","sub":{}}"#.as_slice(),
+        ] {
+            let claims = AuthProviderIdClaims::try_from(raw)?;
+            assert!(claims.has_identity_claims());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_identity_claims_can_be_obtained_from_userinfo() -> Result<(), ErrorResponse> {
+        for raw in [
+            br#"{"sub":"person"}"#.as_slice(),
+            br#"{"email":"person@example.test"}"#.as_slice(),
+            br#"{}"#.as_slice(),
+        ] {
+            let claims = AuthProviderIdClaims::try_from(raw)?;
+            assert!(!claims.has_identity_claims());
+        }
+        Ok(())
+    }
+
     // exists only to understand the query syntax and experiment with it
     #[test]
     #[ignore]

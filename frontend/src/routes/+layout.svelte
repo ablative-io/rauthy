@@ -4,6 +4,9 @@
     import { initI18n } from '$state/i18n.svelte';
 
     import '../css/global.css';
+    import '../css/lys-identity.css';
+
+    let identityClient = $state(false);
 
     initLang();
     initI18n();
@@ -21,6 +24,8 @@
     let cookiesEnabled = $state(true);
 
     onMount(() => {
+        identityClient =
+            new URLSearchParams(window.location.search).get('client_id') === 'lys-directory';
         cookiesEnabled = navigator.cookieEnabled;
         isSecureContext = window.crypto?.subtle !== undefined;
     });
@@ -39,6 +44,9 @@
         </p>
     </div>
 {:else if cookiesEnabled}
+    {#if identityClient}
+        <span id="lys-identity-theme" hidden></span>
+    {/if}
     {@render children()}
 {:else}
     <div>
