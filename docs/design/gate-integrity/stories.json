@@ -1,0 +1,19 @@
+{
+  "cluster": "gate-integrity",
+  "personas": [
+    {
+      "name": "Operator",
+      "role": "Release and gate operation",
+      "stories": [
+        {
+          "id": "S1",
+          "text": "As a release operator, I want gate success to prove all required checks finished on this source so that cancellation cannot authorize a release."
+        },
+        {
+          "id": "S2",
+          "text": "As a gate operator, I want cancellation to retain its outcome and evidence so that safe cleanup cannot be mistaken for passing tests."
+        }
+      ]
+    }
+  ]
+}

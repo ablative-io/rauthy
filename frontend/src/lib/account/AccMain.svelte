@@ -195,7 +195,7 @@
                         <AccWebId bind:webIdData />
                     {/if}
                 {:else if selected === t.account.other}
-                    <AccOther bind:user {providers} />
+                    <AccOther {user} />
                 {:else if selected === t.account.devices}
                     <Devices userId={user.id} />
                 {/if}
@@ -234,7 +234,7 @@
                             <AccWebId bind:webIdData />
                         {/if}
                     {:else if selected === t.account.other}
-                        <AccOther bind:user {providers} />
+                        <AccOther {user} />
                     {:else if selected === t.account.devices}
                         <AccDevices />
                     {/if}

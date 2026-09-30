@@ -1,0 +1,19 @@
+{
+  "cluster": "sender-tls",
+  "personas": [
+    {
+      "name": "Installation owner",
+      "role": "Operate identity without handling credentials",
+      "stories": [
+        {
+          "id": "S1",
+          "text": "As an installation owner, I want the installed sender to authenticate my receiver without manual key copying so that my identity observations remain private."
+        },
+        {
+          "id": "S2",
+          "text": "As an operator, I want a failed delivery to remain pending with a named cause so that retry preserves the original identity and audit operation."
+        }
+      ]
+    }
+  ]
+}

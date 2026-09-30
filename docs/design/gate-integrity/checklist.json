@@ -1,0 +1,35 @@
+{
+  "cluster": "gate-integrity",
+  "sections": [
+    {
+      "name": "Completed evidence",
+      "items": [
+        {
+          "id": "C1",
+          "text": "A passed verdict names the exact source commit and this invocation and is written only after all required legs succeed.",
+          "done": false
+        },
+        {
+          "id": "C2",
+          "text": "A running, interrupted or failed container cannot yield a successful gate result, even when Docker reports ExitCode zero.",
+          "done": false
+        },
+        {
+          "id": "C3",
+          "text": "Cancellation preserves non-success and cleans only owned resources; cleanup never hides an earlier failure.",
+          "done": false
+        },
+        {
+          "id": "C4",
+          "text": "A real interrupted docker start is refused through the production wrapper, using an event handshake rather than a sleep.",
+          "done": false
+        },
+        {
+          "id": "C5",
+          "text": "Missing, malformed, stale and mismatched verdicts are refused and the regression suite participates in the repository gate.",
+          "done": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "cluster": "sender-tls",
+  "title": "Provisioned identity audit transport",
+  "intention": "An installed sender discloses signed identity observations only to its authenticated receiver.",
+  "problem": "The receipt sender currently accepts loopback HTTP and uses system TLS defaults without the installation CA and SPKI pin; Docker host routing crosses a bridge.",
+  "solution": "Consume the Lys installation contract and use standard certificate verification plus a pre-HTTP SPKI check, preserving immutable retries and verified receipt acknowledgement.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "Authenticate transport before transmitting signed application data."
+    },
+    {
+      "id": "P2",
+      "text": "A receipt signature and a TLS server identity are independent trust decisions."
+    }
+  ],
+  "decisions": [],
+  "goals": [
+    "The sender consumes the versioned Lys provisioning contract and refuses absent or conflicting trust by name.",
+    "Every request verifies the configured CA chain, hostname and SPKI pin before sending HTTP headers or a body; cleartext and redirects are refused.",
+    "Transport refusals preserve the original operation and durable person binding without acknowledgement or credential disclosure.",
+    "Independent TLS fixtures measure adversarial refusals, including zero HTTP bytes reaching a wrong-pinned peer.",
+    "The installed sender interoperates with the DIRECTORY-055 receiver and preserves identity through retry and upgrade."
+  ],
+  "non_goals": [
+    {
+      "text": "Receiver provisioning and TLS issuance",
+      "reason": "Owned by Lys DIRECTORY-055."
+    },
+    {
+      "text": "Checkpoint authentication and login reassignment",
+      "reason": "Separate protocols remain explicitly unsupported."
+    }
+  ],
+  "structure": [
+    {
+      "path": "src/service/src/identity_link_tls.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "src/service/src/identity_link_tls_tests.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "src/service/src/identity_link_test_server.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "Cargo.toml",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "Cargo.lock",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/Cargo.toml",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/lib.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_delivery.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_config.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_tests.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_http_tests.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_receipt_tests.rs",
+      "note": "Consume provisioned trust and authenticate the connection before HTTP",
+      "brief": ""
+    },
+    {
+      "path": "src/service/src/identity_link_tls_adversarial_tests.rs",
+      "note": "Measure handshake refusal before signed data is sent",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "src/service/src/identity_link_install_tests.rs",
+      "note": "Prove the provisioned sender against the real receiver",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "scripts/gates/identity-link-tls.sh",
+      "note": "Prove the provisioned sender against the real receiver",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "docs/identity-link-transport.md",
+      "note": "Prove the provisioned sender against the real receiver",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": ".land/identity-link-gate.sh",
+      "note": "Prove the provisioned sender against the real receiver",
+      "brief": ""
+    },
+    {
+      "path": "docs/design/project.json",
+      "note": "Prove the provisioned sender against the real receiver",
+      "brief": ""
+    },
+    {
+      "path": ".land/identity-link-dependencies.sh",
+      "note": "Prepare and prove the pinned dependencies before the offline round",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": "scripts/gates/tests/test_identity_link_dependencies.py",
+      "note": "Prepare and prove the pinned dependencies before the offline round",
+      "brief": "SENDERTLS-001"
+    },
+    {
+      "path": ".land/test.sh",
+      "note": "Prepare and prove the pinned dependencies before the offline round",
+      "brief": ""
+    }
+  ],
+  "inventory": [
+    {
+      "path": "Cargo.toml",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "Cargo.lock",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/Cargo.toml",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/lib.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/identity_link_delivery.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_config.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_tests.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_http_tests.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "src/service/src/identity_link_delivery_receipt_tests.rs",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": ".land/identity-link-gate.sh",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    },
+    {
+      "path": "docs/design/project.json",
+      "note": "Existing sender or gate at candidate 1a351ddf; required predecessor landing."
+    }
+  ],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "The source and receipt operations remain immutable and idempotent across cancellation."
+    },
+    {
+      "id": "CN2",
+      "text": "No live-service writes, target-directory changes or cleartext fallback."
+    }
+  ]
+}

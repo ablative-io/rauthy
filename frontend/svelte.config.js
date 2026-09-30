@@ -33,7 +33,6 @@ const config = {
                 'connect-src': ['self'],
                 'script-src': ['self', 'wasm-unsafe-eval'],
                 'style-src': ['self', 'unsafe-inline'],
-                'font-src': ['self'],
                 'img-src': ['self'],
             },
         },

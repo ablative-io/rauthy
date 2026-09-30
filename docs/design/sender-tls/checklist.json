@@ -1,0 +1,35 @@
+{
+  "cluster": "sender-tls",
+  "sections": [
+    {
+      "name": "Authenticated transport",
+      "items": [
+        {
+          "id": "C1",
+          "text": "The sender consumes the versioned Lys provisioning contract and refuses absent or conflicting trust by name.",
+          "done": false
+        },
+        {
+          "id": "C2",
+          "text": "Every request verifies the configured CA chain, hostname and SPKI pin before sending HTTP headers or a body; cleartext and redirects are refused.",
+          "done": false
+        },
+        {
+          "id": "C3",
+          "text": "Transport refusals preserve the original operation and durable person binding without acknowledgement or credential disclosure.",
+          "done": false
+        },
+        {
+          "id": "C4",
+          "text": "Independent TLS fixtures measure adversarial refusals, including zero HTTP bytes reaching a wrong-pinned peer.",
+          "done": false
+        },
+        {
+          "id": "C5",
+          "text": "The installed sender interoperates with the DIRECTORY-055 receiver and preserves identity through retry and upgrade.",
+          "done": false
+        }
+      ]
+    }
+  ]
+}

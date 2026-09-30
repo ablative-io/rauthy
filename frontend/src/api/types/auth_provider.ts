@@ -129,38 +129,3 @@ export interface ProviderLookupResponse {
     client_secret_basic: boolean;
     client_secret_post: boolean;
 }
-
-export type ProviderLinkAuditState = 'pending' | 'acknowledged';
-
-export type ProviderLinkChange = 'linked' | 'unlinked';
-
-export interface ProviderLinkResponse {
-    provider_id: string;
-    provider_name: string;
-    federation_uid: string;
-    created: number;
-    // the oldest link, which the account's single provider fields show
-    primary: boolean;
-    audit: ProviderLinkAuditState;
-}
-
-export interface ProviderLinkAuditResponse {
-    source_operation_id: string;
-    user_id: string;
-    change: ProviderLinkChange;
-    provider_id: string;
-    issuer: string;
-    subject: string;
-    observer: string | null;
-    observed_at: number;
-    state: ProviderLinkAuditState;
-    receipt?: string;
-    acknowledged_at?: number;
-}
-
-export type ProviderLinkAuditAckRequest = Record<string, never>;
-
-export interface ProviderLinkIntentResponse {
-    intent_id: string;
-    expires_at: number;
-}

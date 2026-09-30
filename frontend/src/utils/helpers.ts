@@ -36,8 +36,8 @@ export function isDefaultScope(name: string) {
     );
 }
 
-export const redirectToLogin = (state?: string, fresh = false) => {
-    return generatePKCE().then(pkce => {
+export const redirectToLogin = (state?: string) => {
+    generatePKCE().then(pkce => {
         if (pkce) {
             localStorage.setItem(PKCE_VERIFIER, pkce.verifier);
             // If we were able to generate PKCE, nonce generation will always succeed as well.
@@ -47,7 +47,7 @@ export const redirectToLogin = (state?: string, fresh = false) => {
             const redirect_uri = `${window.location.origin}${REDIRECT_URI}`
                 .replaceAll(':', '%3A')
                 .replaceAll('/', '%2F');
-            window.location.href = `${AUTH_ENDPOINT}?client_id=${CLIENT_ID}&redirect_uri=${redirect_uri}&response_type=code&code_challenge=${pkce.challenge}&code_challenge_method=S256&scope=openid+profile+email&nonce=${nonce}&state=${s}${fresh ? '&prompt=login&max_age=0' : ''}`;
+            window.location.href = `${AUTH_ENDPOINT}?client_id=${CLIENT_ID}&redirect_uri=${redirect_uri}&response_type=code&code_challenge=${pkce.challenge}&code_challenge_method=S256&scope=openid+profile+email&nonce=${nonce}&state=${s}`;
         }
     });
 };

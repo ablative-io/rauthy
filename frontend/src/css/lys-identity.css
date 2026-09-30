@@ -1,0 +1,70 @@
+/* The Lys client's controls use the identity surface's existing design tokens. */
+@font-face {
+    font-family: 'DM Sans';
+    src: url('../assets/lys/dm-sans.ttf') format('truetype');
+    font-weight: 100 1000;
+    font-style: normal;
+    font-display: swap;
+}
+
+body:has(#lys-identity-theme) {
+    font:
+        13px/1.6 'DM Sans',
+        system-ui,
+        sans-serif;
+    background: #121218;
+    color: #f4f4f5;
+}
+
+body:has(#lys-identity-theme) :is(input, button, select, .font-label, .font-default) {
+    font-family: 'DM Sans', system-ui, sans-serif;
+}
+
+body:has(#lys-identity-theme) h2 {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+}
+
+body:has(#lys-identity-theme)
+    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select) {
+    color: #f4f4f5;
+    background: #0d0d12;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.5rem;
+    font-size: 13px;
+    padding: 7px 10px;
+}
+
+body:has(#lys-identity-theme)
+    :is(input:not([type='checkbox'], [type='radio'], [type='range']), select):focus-visible {
+    outline: 2px solid rgba(212, 151, 90, 0.5);
+    outline-offset: 2px;
+}
+
+body:has(#lys-identity-theme) input.invalid {
+    border-color: #f87171;
+}
+
+body:has(#lys-identity-theme) button:not(.invisible) {
+    border-radius: 0.5rem;
+    font-size: 12.5px;
+    padding: 6px 12px;
+}
+
+body:has(#lys-identity-theme) button.l1:not([aria-disabled='true']) {
+    background: #d4975a;
+    color: #17110b;
+    border-color: transparent;
+    font-weight: 600;
+}
+
+body:has(#lys-identity-theme) button.l1:not([aria-disabled='true']):hover {
+    background: #e0a870;
+}
+
+body:has(#lys-identity-theme) button:focus-visible {
+    outline: 2px solid rgba(212, 151, 90, 0.5);
+    outline-offset: 2px;
+}

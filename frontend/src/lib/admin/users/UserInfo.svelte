@@ -9,8 +9,7 @@
     import type { GroupResponse } from '$api/types/groups.ts';
     import type { SelectItem } from '$lib5/select_list/props.ts';
     import { fmtDateInput, fmtTimeInput, unixTsFromLocalDateTime } from '$utils/form';
-    import { fetchGet, fetchPatch } from '$api/fetch';
-    import type { ProviderLinkResponse } from '$api/types/auth_provider.ts';
+    import { fetchPatch } from '$api/fetch';
     import Form from '$lib5/form/Form.svelte';
     import IconCheck from '$icons/IconCheck.svelte';
     import { useI18n } from '$state/i18n.svelte';
@@ -123,26 +122,11 @@
         ),
     );
 
-    let linkedProviders: ProviderLinkResponse[] = $state([]);
-    let providerName = $derived.by(() => {
-        if (linkedProviders.length > 0) {
-            return linkedProviders.map(l => `${l.provider_name} (audit ${l.audit})`).join(', ');
-        }
-        return user.account_type?.startsWith('federated')
+    let providerName = $derived(
+        user.account_type?.startsWith('federated')
             ? providers.filter(p => p.id == user.auth_provider_id)[0]?.name
-            : '';
-    });
-
-    $effect(() => {
-        fetchLinkedProviders(user.id);
-    });
-
-    async function fetchLinkedProviders(userId: string) {
-        let res = await fetchGet<ProviderLinkResponse[]>(
-            `/auth/v1/providers/links/users/${userId}`,
-        );
-        linkedProviders = res.body || [];
-    }
+            : '',
+    );
 
     let isUnsaved = $derived.by(() => {
         if (!user || !userOrig) {

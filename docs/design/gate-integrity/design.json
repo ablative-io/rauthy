@@ -1,0 +1,125 @@
+{
+  "cluster": "gate-integrity",
+  "title": "Gate outcomes that prove completed work",
+  "intention": "Only a completed measured gate authorizes release; interruption is never success.",
+  "problem": "On 28 September 2026 an interrupted docker start attachment returned zero while its container was still running. The wrapper read the unfinished container ExitCode zero, cleaned it up, and the outer receipt also said zero although the log stopped at WASM.",
+  "solution": "Carry an invocation and exact commit through a dedicated completed verdict producer and a strict consumer. Container supervision first proves terminal state; it then checks process status and the completed receipt. Cancellation and cleanup retain independent failure evidence. Test the actual detach through the shared production supervision helper.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "A transport client exit is not a test verdict."
+    },
+    {
+      "id": "P2",
+      "text": "Cleanup cannot turn incomplete work into success."
+    }
+  ],
+  "decisions": [],
+  "goals": [
+    "A passed verdict names the exact source commit and this invocation and is written only after all required legs succeed.",
+    "A running, interrupted or failed container cannot yield a successful gate result, even when Docker reports ExitCode zero.",
+    "Cancellation preserves non-success and cleans only owned resources; cleanup never hides an earlier failure.",
+    "A real interrupted docker start is refused through the production wrapper, using an event handshake rather than a sleep.",
+    "Missing, malformed, stale and mismatched verdicts are refused and the regression suite participates in the repository gate."
+  ],
+  "non_goals": [
+    {
+      "text": "VM memory budgets and Cargo job counts",
+      "reason": "Separate capacity card uses the measured single-job peak."
+    },
+    {
+      "text": "Live identity installation",
+      "reason": "Gate integrity changes neither runtime data nor credentials."
+    }
+  ],
+  "structure": [
+    {
+      "path": ".land/gate-verdict.py",
+      "note": "Produce and validate an invocation-bound completed verdict",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": "scripts/gates/tests/test_gate_verdict.py",
+      "note": "Produce and validate an invocation-bound completed verdict",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": ".land/identity-link-gate.sh",
+      "note": "Produce and validate an invocation-bound completed verdict",
+      "brief": ""
+    },
+    {
+      "path": ".land/container-gate.sh",
+      "note": "Require a terminal container and preserve cancellation",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": "scripts/gates/tests/test_container_outcome.py",
+      "note": "Require a terminal container and preserve cancellation",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": ".land/test.sh",
+      "note": "Require a terminal container and preserve cancellation",
+      "brief": ""
+    },
+    {
+      "path": "scripts/gates/tests/test_gate_interruption.py",
+      "note": "Reproduce the real Docker attachment interruption",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": "scripts/gates/tests/gate_fixture.sh",
+      "note": "Reproduce the real Docker attachment interruption",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": "scripts/gates/gate-integrity.sh",
+      "note": "Make verdict regressions part of the repository gate",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": "docs/gate-integrity.md",
+      "note": "Make verdict regressions part of the repository gate",
+      "brief": "GATEINTEGRITY-001"
+    },
+    {
+      "path": ".land/gates.sh",
+      "note": "Make verdict regressions part of the repository gate",
+      "brief": ""
+    },
+    {
+      "path": "docs/design/project.json",
+      "note": "Make verdict regressions part of the repository gate",
+      "brief": ""
+    }
+  ],
+  "inventory": [
+    {
+      "path": ".land/test.sh",
+      "note": "Existing gate boundary in the fork admission candidate 76a394eb."
+    },
+    {
+      "path": ".land/identity-link-gate.sh",
+      "note": "Existing gate boundary in the fork admission candidate 76a394eb."
+    },
+    {
+      "path": ".land/gates.sh",
+      "note": "Existing gate boundary in the fork admission candidate 76a394eb."
+    },
+    {
+      "path": "docs/design/project.json",
+      "note": "Existing gate boundary in the fork admission candidate 76a394eb."
+    }
+  ],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "Use the checkout normal Cargo target directory and retain every existing gate."
+    },
+    {
+      "id": "CN2",
+      "text": "Heavy execution occurs on Dean; the brief does not authorize live mutations."
+    }
+  ]
+}
